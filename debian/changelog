@@ -1,3 +1,21 @@
+odemis (2.6.0-1ubuntu2) precise; urgency=medium
+
+  * New version: 2.7
+  * Main new features:
+    - Support for displaying pyramidal TIFF images
+  * Main improvements:
+    - Improve reliability of Phenom driver (DELPHI)
+    - Additional low-level control of Andor iXon and Newton CCDs (SPARC/SECOM)
+    - Support for manually changing the turret on Andor Shamrock (SPARC)
+  * Main bugs fixed:
+    - Turn off the emission status led when no emission is active on omicron ledhub (DELPHI/SECOM)
+    - Stream could sometimes be playing in background if acquisition is cancelled early (SPARC)
+    - When a dye has no emission wavelength fitting, pick the closest one anyway (DELPHI/SECOM)
+    - When centre wavelength is at 0, show it as "0 nm" instead of "0 m" (SPARC)
+    - Allow to enter "None" on odemis-cli in addition to "null"
+
+ -- Éric Piel (Delmic) <piel@delmic.com>  Tue, 28 Mar 2017 13:11:40 +0200
+
 odemis (2.6.0-1ubuntu1) precise; urgency=medium
 
   * New version: 2.6

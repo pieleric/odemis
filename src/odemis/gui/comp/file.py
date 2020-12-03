@@ -53,7 +53,7 @@ class FileBrowser(wx.Panel):
                  clear_btn=False,
                  clear_label="",
                  dialog_title="Browse for file",
-                 wildcard="*.*",
+                 wildcard="Any file (*.*)|*.*",
                  name='fileBrowser',
                  file_path=None,
                  default_dir=None,

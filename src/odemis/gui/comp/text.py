@@ -190,22 +190,32 @@ class SuggestTextCtrl(wx.TextCtrl, listmix.ColumnSorterMixin):
                 self._showDropDown(False)
             event.Skip()
             return
-        found = False
 
+        found = None
         choices = self._choices
 
         for numCh, choice in enumerate(choices):
-            if self._match_function and self._match_function(text, choice):
-                found = True
+            if self._match_function:
+                if self._match_function(text, choice):
+                    found = numCh
+                    break
             elif choice.lower().startswith(text.lower()):
-                found = True
-            if found:
-                self._showDropDown(True)
-                item = self.dropdownlistbox.GetItem(numCh)
-                toSel = item.GetId()
-                self.dropdownlistbox.Select(toSel)
+                found = numCh
                 break
-        if not found:
+
+        # Try to match any part of the text if standard matching didn't return anything
+        if found is None:
+            for numCh, choice in enumerate(choices):
+                if text.lower() in choice.lower():
+                    found = numCh
+                    break
+
+        if found is not None:
+            self._showDropDown(True)
+            item = self.dropdownlistbox.GetItem(found)
+            toSel = item.GetId()
+            self.dropdownlistbox.Select(toSel)
+        else:
             self.dropdownlistbox.Select(self.dropdownlistbox.GetFirstSelected(), False)
             if self._hide_on_no_match:
                 self._showDropDown(False)

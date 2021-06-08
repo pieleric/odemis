@@ -274,6 +274,15 @@ class AndorV2DLL(CDLL):
     AM_FASTKINETICS = 4
     AM_VIDEO = 5  # aka "run til abort"
 
+    # Trigger modes, for SetTriggerMode() and IsTriggerModeAvailable()
+    TM_INTERNAL = 0
+    TM_EXTERNAL = 1
+    TM_EXTERNALSTART = 6
+    TM_EXTERNALEXPOSURE = 7
+    TM_EXTERNAL_FVB_EM = 9
+    TM_SOFTWARE = 10
+    TM_EXTERNAL_CHARGESHIFTING = 12
+
     @staticmethod
     def at_errcheck(result, func, args):
         """
@@ -824,6 +833,16 @@ class AndorCam2(model.DigitalCamera):
             logging.debug("Frame transfer mode selected")
 
         self.atcore.SetTriggerMode(0) # 0 = internal
+
+        # TODO: check if software trigger is available
+        if caps.TriggerModes & AndorCapabilities.TRIGGERMODE_CONTINUOUS:
+            logging.debug("Camera supports software trigger")
+            # It still needs to be in the right settings (run til abort), which can be
+            # confirmed withIsTriggerModeAvailable(TM_SOFTWARE)
+            # Can then do, SetTriggerMode(TM_SOFTWARE)
+            # At the right time, SendSoftwareTrigger()
+        else:
+            logging.warning("Camera does not support software trigger")
 
         # For "Run Til Abort".
         # We used to do it after changing the settings, but on the iDus, it

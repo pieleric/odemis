@@ -370,27 +370,31 @@ class VigilantAttributeProxy(VigilantAttributeBase, Pyro4.Proxy):
 
     @property
     def value(self):
-        return self.__getattr__("_get_value")()
+        # return self.__getattr__("_get_value")()
+        return self._get_value()
 
     @value.setter
     def value(self, v):
         if self.readonly:
             raise NotSettableError("Value is read-only")
-        return self.__getattr__("_set_value")(v)
+        # return self.__getattr__("_set_value")(v)
+        return self._set_value(v)
     # no delete remotely
 
     # for enumerated VA
     @property
     def choices(self):
         # raises AttributeError if not found
-        value = Pyro4.Proxy.__getattr__(self, "_get_choices")()
+        # value = Pyro4.Proxy.__getattr__(self, "_get_choices")()
+        value = self._get_choices()
         return value
 
     # for continuous VA
     @property
     def range(self):
         # raises AttributeError if not found
-        value = Pyro4.Proxy.__getattr__(self, "_get_range")()
+        # value = Pyro4.Proxy.__getattr__(self, "_get_range")()
+        value = self._get_range()
         return value
 
     def __getstate__(self):
@@ -448,7 +452,7 @@ class VigilantAttributeProxy(VigilantAttributeBase, Pyro4.Proxy):
 
         # send subscription to the actual VA
         # a bit tricky because the underlying method gets created on the fly
-        Pyro4.Proxy.__getattr__(self, "subscribe")(self._proxy_name)
+        self._pyroGetRemoteMethod("subscribe")(self._proxy_name)
 
     def unsubscribe(self, listener):
         VigilantAttributeBase.unsubscribe(self, listener)
@@ -459,7 +463,7 @@ class VigilantAttributeProxy(VigilantAttributeBase, Pyro4.Proxy):
         """
         stop the remote subscription
         """
-        Pyro4.Proxy.__getattr__(self, "unsubscribe")(self._proxy_name)
+        self._pyroGetRemoteMethod("unsubscribe")(self._proxy_name)
         if self._commands:
             self._commands.send(b"UNSUB")
 
@@ -472,7 +476,7 @@ class VigilantAttributeProxy(VigilantAttributeBase, Pyro4.Proxy):
                         logging.warning("Stopping subscription while there are still subscribers "
                                         "because VA '%s' is going out of context",
                                         self._global_name)
-                        Pyro4.Proxy.__getattr__(self, "unsubscribe")(self._proxy_name)
+                        self._pyroGetRemoteMethod("unsubscribe")(self._proxy_name)
                     self._commands.send(b"STOP")
                     self._thread.join(1)
                 self._commands.close()

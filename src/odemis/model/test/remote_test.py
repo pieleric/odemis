@@ -374,9 +374,12 @@ class RemoteTest(unittest.TestCase):
         # test it raises when wrong argument
         self.assertRaises(TypeError, self.comp.ping, ("non needed arg",))
 
-        # non existing method
-        self.assertRaises(AttributeError, self.comp.non_existing_method)
+        with self.assertRaises(AttributeError):
+            self.comp.non_existing_obj
 
+        # non existing method
+        with self.assertRaises(AttributeError):
+            self.comp.non_existing_method()
 
 #    @unittest.skip("simple")
     def test_roattributes(self):

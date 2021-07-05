@@ -70,7 +70,10 @@ def hasVA(component, vaname):
     vaname (str)
     returns (bool): True if the component has an attribute named vaname which is a VA
     """
-    return isinstance(getattr(component, vaname, None), _vattributes.VigilantAttributeBase)
+    # Use __dict__, to also work on Proxy, without forcing it to check remotely
+    # (as VAs are automatically set at init)
+    return vaname in component.__dict__ and isinstance(component.__dict__[vaname], _vattributes.VigilantAttributeBase)
+    #return isinstance(getattr(component, vaname, None), _vattributes.VigilantAttributeBase)
 
 
 def getROAttributes(component):

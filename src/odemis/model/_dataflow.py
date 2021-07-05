@@ -475,7 +475,7 @@ class DataFlowProxy(DataFlowBase, Pyro4.Proxy):
         try:
             # send subscription to the actual dataflow and inform dataflow that this remote listener is interested
             # a bit tricky because the underlying method gets created on the fly
-            Pyro4.Proxy.__getattr__(self, "subscribe")(self._proxy_name)
+            self._pyroGetRemoteMethod("subscribe")(self._proxy_name)
         except Exception as ex:
             logging.error("Subscribing to the dataflow failed. %s", ex)
             self._commands.send(b"UNSUB")  # asynchronous (necessary to not deadlock)
@@ -483,7 +483,7 @@ class DataFlowProxy(DataFlowBase, Pyro4.Proxy):
 
     def stop_generate(self):
         # stop the remote subscription
-        Pyro4.Proxy.__getattr__(self, "unsubscribe")(self._proxy_name)
+        self._pyroGetRemoteMethod("unsubscribe")(self._proxy_name)
         self._commands.send(b"UNSUB")  # asynchronous (necessary to not deadlock)
 
     def __del__(self):
@@ -496,7 +496,7 @@ class DataFlowProxy(DataFlowBase, Pyro4.Proxy):
                             logging.debug("Stopping subscription while there "
                                           "are still subscribers because dataflow '%s' is going out of context",
                                           self._global_name)
-                        Pyro4.Proxy.__getattr__(self, "unsubscribe")(self._proxy_name)
+                        self._pyroGetRemoteMethod("unsubscribe")(self._proxy_name)
                     self._commands.send(b"STOP")
                     self._thread.join(1)
                 self._commands.close()

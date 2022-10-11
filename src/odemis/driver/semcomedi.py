@@ -1696,8 +1696,20 @@ class SEMComedi(model.HwComponent):
 
                 self._check_cmd_q(block=False)
 
+                # DEBUG
+                # get the scan values (automatically updated to the latest needs)
+                (scan, period, shape, margin,
+                 wchannels, wranges, osr, dpr) = self._scanner.get_scan_data(1)
+                # Immediately write the first position to give the beam a bit more
+                # settling time while we are preparing the whole scan.
+                for p, c, r in zip(scan[0, 0], wchannels, wranges):
+                    comedi.data_write(self._device, self._ao_subdevice, c, r,
+                                      comedi.AREF_GROUND, int(p))
+                logging.debug("Set to early starting position at %s", scan[0, 0])
+
                 # Ensures we don't wait _again_ for synchronised DataFlows on error
                 self._scanner.indicate_scan_state(True)
+
                 if nfailures == 0:
                     detectors = tuple(self._acq_wait_detectors_ready())  # ordered
                 if detectors:

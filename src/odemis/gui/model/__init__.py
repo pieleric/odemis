@@ -367,7 +367,7 @@ class MainGUIData(object):
             if not any((self.ccd, self.photo_ds, self.sed, self.bsd, self.ebic, self.cld, self.spectrometer, self.time_correlator)):
                 raise KeyError("No detector found in the microscope")
 
-            if not self.light and not self.ebeam:
+            if not any((self.light, self.ebeam, self.ion_beam)):
                 raise KeyError("No emitter found in the microscope")
 
             # Optical path manager: used to control the actuators so that the

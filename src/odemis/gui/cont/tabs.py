@@ -881,7 +881,7 @@ class SecomStreamsTab(Tab):
                 logging.error("No EM detector found")
 
         if main_data.ion_beam:
-            fib_stream = acqstream.FIBStream("Fib scanner",
+            fib_stream = acqstream.FIBStream("Ion beam",
                                              main_data.sed,
                                              main_data.sed.data,
                                              main_data.ion_beam,

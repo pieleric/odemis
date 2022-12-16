@@ -184,8 +184,84 @@ HW_SETTINGS_CONFIG = {
                 "control_type": util.mag_if_no_hfw_ctype,
             }),
             ("dwellTime", {
-                "control_type": odemis.gui.CONTROL_SLIDER,
                 "tooltip": "Pixel integration time",
+                # "control_type": odemis.gui.CONTROL_SLIDER,
+                "range": (1e-9, 1),
+                "scale": "log",
+                "type": "float",
+                "accuracy": 3,
+                "event": wx.EVT_SCROLL_CHANGED
+            }),
+            ("scale", {
+                # same as binning (but accepts floats)
+                "control_type": odemis.gui.CONTROL_RADIO,
+                "tooltip": "Pixel resolution preset",
+                # means will make sure both dimensions are treated as one
+                "choices": util.binning_1d_from_2d,
+            }),
+            ("resolution", {
+                "control_type": odemis.gui.CONTROL_COMBO,
+                "tooltip": "Number of pixels in the image",
+                "choices": util.resolution_from_range,
+                "accuracy": None,  # never simplify the numbers
+            }),
+            # what we don't want to display:
+            ("power", {
+                "control_type": odemis.gui.CONTROL_NONE,
+            }),
+            ("translation", {
+                "control_type": odemis.gui.CONTROL_NONE,
+            }),
+            ("shift", {
+                "control_type": odemis.gui.CONTROL_NONE,
+            }),
+            # TODO: might be useful if it's not read-only
+            ("rotation", {
+                "control_type": odemis.gui.CONTROL_NONE,
+            }),
+            ("pixelSize", {
+                "control_type": odemis.gui.CONTROL_NONE,
+            }),
+            ("depthOfField", {
+                "control_type": odemis.gui.CONTROL_NONE,
+            }),
+            ("blanker", {
+                "control_type": odemis.gui.CONTROL_NONE,
+            }),
+            ("external", {
+                "control_type": odemis.gui.CONTROL_NONE,
+            }),
+            ("scanner", {
+                "control_type": odemis.gui.CONTROL_NONE,
+            }),
+        )),
+    "ion-beam":
+        OrderedDict((
+            ("accelVoltage", {
+                "label": "Accel. voltage",
+                "tooltip": "Accelerating voltage",
+                "event": wx.EVT_SCROLL_CHANGED  # only affects when it's a slider
+            }),
+            ("probeCurrent", {
+                "event": wx.EVT_SCROLL_CHANGED  # only affects when it's a slider
+            }),
+            ("spotSize", {
+                "tooltip": "Electron-beam Spot size",
+            }),
+            ("horizontalFoV", {
+                "label": "HFW",
+                "tooltip": "Horizontal Field Width",
+                "control_type": odemis.gui.CONTROL_COMBO,
+                "choices": util.hfw_choices,
+                "accuracy": 3,
+            }),
+            ("magnification", {
+                # Depends whether it is readonly or not
+                "control_type": util.mag_if_no_hfw_ctype,
+            }),
+            ("dwellTime", {
+                "tooltip": "Pixel integration time",
+                # only affects when it's a slider (ie, if the VA is Continuous)
                 "range": (1e-9, 1),
                 "scale": "log",
                 "type": "float",

@@ -824,6 +824,16 @@ class TestGISReservoir(unittest.TestCase):
         """
         cls.oserver.terminate()
 
+    def test_basic(self):
+        """
+        Test each VA has an expected value
+        """
+        self.assertGreaterEqual(self.gis_res.age.value, 0)  # s
+        self.assertTrue(-200 <= self.gis_res.temperature.value <= 50)  # °C
+        self.assertTrue(-200 <= self.gis_res.targetTemperature.value <= 50)  # °C
+        self.assertIn(self.gis_res.temperatureRegulation.value, (True, False))
+        self.assertIsInstance(self.gis_res.precursorType.value, str)
+
     def test_errorstate(self):
         """
         Check that the state VA is updated properly

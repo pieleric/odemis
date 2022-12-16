@@ -1213,6 +1213,7 @@ class GISReservoir(model.HwComponent):
         self.temperature = model.FloatContinuous(0, unit="°C", range=(-273.15, 1e3), readonly=True)
         self.temperatureRegulation = model.BooleanVA(False, setter=self._setTemperatureRegulation)
         self.age = model.FloatContinuous(0, unit="s", readonly=True, range=(0, 1e12))
+        self._ageConnector = None
         self.precursorType = model.StringVA("", readonly=True)
 
         self.on_connect()
@@ -1222,18 +1223,17 @@ class GISReservoir(model.HwComponent):
         Defines direct pointers to server components and connects parameter callbacks for the Orsay server.
         Needs to be called after connection and reconnection to the server.
         """
-        logging.debug("Current param: %r", self._temperaturePar)
         self._gis = self.parent.datamodel.HybridGIS
         self._temperaturePar = self._gis.ReservoirTemperature
-
-        logging.debug("After param: %r", self._temperaturePar)
 
         self._gis.ErrorState.Subscribe(self._updateErrorState)
         self._gis.RodPosition.Subscribe(self._updateErrorState)
         self._temperaturePar.Subscribe(self._updateTargetTemperature)
         self._temperaturePar.Subscribe(self._updateTemperature)
         self._gis.RegulationOn.Subscribe(self._updateTemperatureRegulation)
-        self._gis.ReservoirLifeTime.Subscribe(self._updateAge)
+        # self._gis.ReservoirLifeTime.Subscribe(self._updateAge)
+        self._ageConnector = OrsayParameterConnector(self.age, self._gis.ReservoirLifeTime, factor=3600)
+
         self._gis.PrecursorType.Subscribe(self._updatePrecursorType)
 
         self.update_VAs()
@@ -1246,8 +1246,10 @@ class GISReservoir(model.HwComponent):
         self._updateTargetTemperature()
         self._updateTemperature()
         self._updateTemperatureRegulation()
-        self._updateAge()
+        # self._updateAge()
         self._updatePrecursorType()
+        for connector in get_orsay_param_connectors(self):
+            connector.update_VA()
 
     def _updateErrorState(self, parameter=None, attr_name="Actual"):
         """

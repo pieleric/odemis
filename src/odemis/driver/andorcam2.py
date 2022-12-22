@@ -540,6 +540,9 @@ class AndorCam2(model.DigitalCamera):
         if isinstance(device, basestring):
             self._device, self.handle = self._findDevice(device)
         else:
+            # TODO: check it's an int, which is between 0 & 32. Any larger number is probably a serial number without quotes.
+            if not 0 <= device <= 32:
+                raise ValueError(f"Device number {device} is not between 0 and 32. Did you mean to type a serial number, use \"quotes\" for that.")
             self._device = device  # for reinit only
             try:
                 logging.debug("Looking for camera %d, can be long...", device)  # ~20s

@@ -5092,6 +5092,28 @@ class EnzelAlignTab(Tab):
             return None
 
 
+class MimasAlignTab(Tab):
+    """
+    Tab to perform the beam alignment of MIMAS.
+    """
+
+    def __init__(self, name, button, panel, main_frame, main_data):
+        tab_data = guimod.MicroscopyGUIData(main_data)
+        super().__init__(name, button, panel, main_frame, tab_data)
+        # self.set_label("ALIGNMENT")
+        self._stream_controllers = []
+        # self._stage = main_data.stage
+        # self._stage_global = main_data.stage_global
+        # self._aligner = main_data.aligner
+
+    @classmethod
+    def get_display_priority(cls, main_data):
+        if main_data.role in ("mimas",):
+            return 1
+        else:
+            return None
+
+
 class SparcAlignTab(Tab):
     """
     Tab for the mirror/fiber alignment on the SPARC

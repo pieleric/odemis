@@ -5204,7 +5204,7 @@ class EnzelAlignTab(Tab):
 
         # Destroy the old stream controllers  # TODO This is a temporary fix and it could be handled better
         for stream_controller in self._stream_controllers:
-            stream_controller._on_stream_panel_destroy(None)
+            stream_controller._on_stream_panel_destroy()
 
         # Keep a reference to the stream controllers so the garbage collector does not delete them.
         self._stream_controllers = []
@@ -6410,8 +6410,9 @@ class Sparc2AlignTab(Tab):
             # DEACTIVE position move it to the default (DEACTIVE) position
             if ((not almost_equal(spec_switch_xpos, spec_switch_xmd_deactive)) and
                     (not almost_equal(spec_switch_xpos, spec_switch_xmd_active))):
+                # execute a move without tracking using a progress bar so
+                # no update to the GUI when the alignment tab is hidden
                 self._spec_switch_f = main.spec_switch.moveAbs({"x": spec_switch_xmd_deactive})
-                # self._spec_switch_f.add_done_callback(self._on_specswitch_button_done)
 
             # future and progress connector for tracking the progress of the gauge when moving
             self._pfc_spec_switch = None

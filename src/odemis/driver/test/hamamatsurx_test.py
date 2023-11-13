@@ -39,7 +39,7 @@ CONFIG_DELAYBOX = {"name": "Delaybox", "role": "delaybox"}
 
 STREAK_CHILDREN = {"readoutcam": CONFIG_READOUTCAM, "streakunit": CONFIG_STREAKUNIT, "delaybox": CONFIG_DELAYBOX}
 
-KWARGS_STREAKCAM = dict(name="streak cam", role="ccd", host="172.16.4.2", port=1001, children=STREAK_CHILDREN)
+KWARGS_STREAKCAM = dict(name="streak cam", role="ccd", host="192.168.56.103", port=1001, children=STREAK_CHILDREN)
 
 # test with spectrograph
 CLASS_SPECTROGRAPH = andorshrk.Shamrock

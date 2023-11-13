@@ -1112,6 +1112,7 @@ class StreakCamera(model.HwComponent):
 
                 logging.debug("Interpreted response: %s.", response)
                 if error_code:  # != 0, response corresponds to command, but an error occurred
+                    # FIXME: pass the rargs, which can contain extra info
                     logging.error(RemoteExError(error_code))
                     raise RemoteExError(error_code)
                 else:  # successfully executed command and return message

@@ -17,6 +17,7 @@ You should have received a copy of the GNU General Public License along with Ode
 
 import collections
 import functools
+import select
 import threading
 import logging
 import math
@@ -24,6 +25,8 @@ import numbers
 import queue
 import socket
 import time
+import re
+from typing import Tuple, Optional, Dict
 
 import numpy
 
@@ -56,7 +59,6 @@ DELAY_NAME_VAS = ["triggerDelay", "delayB", "delayC", "delayD", "delayE", "delay
 
 
 class RemoteExError(IOError):
-
     def __init__(self, errno, *args, **kwargs):
         # Needed for pickling, cf https://bugs.python.org/issue1692335 (fixed in Python 3.3)
         desc = self._errordict.get(errno, "Unknown RemoteEx error.")
@@ -67,18 +69,18 @@ class RemoteExError(IOError):
         return self.strerror
 
     _errordict = {
-            0: "Command successfully executed.",
-            1: "Invalid syntax (command must be followed by"
-               "parentheses and must have the correct number"
-               "and type of parameters separated by comma).",
-            2: "Command or Parameters are unknown.",
-            3: "Command currently not possible.",
-            6: "Parameter is missing.",
-            7: "Command cannot be executed.",
-            8: "An error has occurred during execution.",
-            9: "Data cannot be sent by TCP-IP.",
-            10: "Value of a parameter is out of range.",
-        }
+        0: "Command successfully executed",
+        # command must be followed by parentheses and must have the correct number and type of
+        # parameters separated by comma
+        1: "Invalid syntax for command",
+        2: "Command or Parameters are unknown",
+        3: "Command currently not possible",
+        6: "Parameter is missing",
+        7: "Command cannot be executed",
+        8: "An error has occurred during execution",
+        9: "Data cannot be sent by TCP-IP",
+        10: "Value of a parameter is out of range",
+    }
 
 
 class ReadoutCamera(model.DigitalCamera):
@@ -99,46 +101,47 @@ class ReadoutCamera(model.DigitalCamera):
             logging.warning("No spectrograph specified. No wavelength metadata will be attached.")
 
         try:
-            # TODO make nice!
-            self.parent._getReadoutCamInfo = True
             cam_info = parent.CamParamGet("Setup", "CameraInfo")
+            # Should have 1 argument, containing the camera info as multiline string, like this:
+            # "OrcaFlash 4.0 V3\r\nProduct number: C13440-20C\r\nSerial number: 301730\r\nFirmware: 4.20.B\r\nVersion: 4.20.B03-A19-B02-4.02"
+            cam_info = cam_info[0].split("\r\n")
         except IOError:
             logging.exception("Failed to get readout camera info")
             # Might be due to the frame grabber failing to initialise (sometimes happens),
             # or the camera not being turned on.
             raise model.HwError("Failed to find readout camera, check it is powered. If powered, restart the Hamamatsu PC")
 
-        # Only initiliase the component after we are sure not to raise HwError,
+        # Only initialise the component after we are sure not to raise HwError,
         # because HwError tells the back-end it should try again. As this
         # component is a child it doesn't get automatically unregistered from
         # the back-end (Pyro4) on, and next trial would fail.
-        super(ReadoutCamera, self).__init__(name, role, parent=parent, **kwargs)
+        super().__init__(name, role, parent=parent, **kwargs)
 
         try:
             self._hwVersion = cam_info[0] + ", " + cam_info[1] + ", " + cam_info[2]  # needs to be a string
         except:
             self._hwVersion = "N.A."
-            logging.debug("Could not get hardware information for streak readout camera.")
+            logging.debug("Could not get hardware information for streak readout camera.", exc_info=True)
         self._metadata[model.MD_HW_VERSION] = self._hwVersion
         try:
             self._swVersion = cam_info[3] + ", " + cam_info[4]  # needs to be a string
         except:
             self._swVersion = "N.A."
-            logging.debug("Could not get software information for streak readout camera.")
+            logging.debug("Could not get software information for streak readout camera.", exc_info=True)
         self._metadata[model.MD_SW_VERSION] = self._swVersion
         self._metadata[model.MD_DET_TYPE] = model.MD_DT_INTEGRATING
 
         # TODO: Check what values to set
+        avail_params = parent.CamParamsList("Setup")
         # Set parameters readout camera
-        # parent.CamParamSet("Setup", "TimingMode", "Internal timing")  # TODO external check displayed command in GUI
-        # # parent.CamParamSet("Setup", "TriggerMode", 'Edge trigger')
-        # # parent.CamParamSet("Setup", "TriggerSource", 'BNC')
-        # # parent.CamParamSet("Setup", "TriggerPolarity", 'neg.')
-        # parent.CamParamSet("Setup", "ScanMode", 'Subarray')
-        # parent.CamParamSet("Setup", "Binning", '2 x 2')
-        # # parent.CamParamSet("Setup", "VWidth", '1016')
-        # # parent.CamParamSet("Setup", "HWidth", '1344')
-        # parent.CamParamSet("Setup", "ShowGainOffset", 'True')
+        if "TimingMode" in avail_params:
+            parent.CamParamSet("Setup", "TimingMode", "Internal timing")  # TODO external check displayed command in GUI
+        # parent.CamParamSet("Setup", "TriggerMode", 'Edge trigger')
+        # parent.CamParamSet("Setup", "TriggerSource", 'BNC')
+        # parent.CamParamSet("Setup", "TriggerPolarity", 'neg.')
+        parent.CamParamSet("Setup", "ScanMode", 'Subarray')
+        parent.CamParamSet("Setup", "Binning", '2 x 2')
+        parent.CamParamSet("Setup", "ShowGainOffset", 'True')
 
         # sensor size (resolution)
         # Note: sensor size of OrcaFlash is actually much larger (2048px x 2048px)
@@ -154,9 +157,12 @@ class ReadoutCamera(model.DigitalCamera):
 
         self._binning = self._transposeSizeToUser(self._getBinning())  # used by _setResolution
 
-        # need to be before binning, as it is modified when changing binning
+        # For now, changing the resolution is not really supported, as the full field of view is always used.
+        # It's just automatically adjusted when changing the binning.
         self._resolution = (int(full_res[0]/self._binning[0]), int(full_res[1]/self._binning[1]))
         self.resolution = model.ResolutionVA(self._resolution, ((1, 1), full_res), setter=self._setResolution)
+        parent.CamParamSet("Setup", "HWidth", str(full_res[0]))
+        parent.CamParamSet("Setup", "VWidth", str(full_res[1]))
 
         choices_bin = set(self._transposeSizeToUser(b) for b in self._getReadoutCamBinningChoices())
         self.binning = model.VAEnumerated(self._binning, choices_bin, setter=self._setBinning)
@@ -408,10 +414,11 @@ class ReadoutCamera(model.DigitalCamera):
 
     def _mergeMetadata(self, md):
         """
-        Create dict containing all metadata from the children readout camera, streak unit, delay genereator
+        Create dict containing all metadata from the children readout camera, streak unit, delay generator
         and the metadata from the parent streak camera.
         """
 
+        # TODO: delay generator should be optional
         md_devices = [self.parent._streakunit._metadata, self.parent._delaybox._metadata]
 
         for md_dev in md_devices:
@@ -421,6 +428,34 @@ class ReadoutCamera(model.DigitalCamera):
                 elif key in (model.MD_HW_NAME, model.MD_HW_VERSION, model.MD_SW_VERSION):
                     md[key] = ", ".join([md[key], md_dev[key]])
         return md
+
+    def _get_time_scale(self) -> numpy.ndarray:
+        """
+        Retrieve the scale value for the time axis of the readout camera.
+        :return: one dimensional array, with one valueper pixel along the Y dimension,
+        corresponding to the time (in s) for the pixels on this line.
+        :raises: TimeoutError if the scaling table could not be retrieved.
+        """
+        logging.debug("Request scaling table for time axis of Hamamatsu streak camera.")
+        # request scaling table
+        scl_table_info = self.parent.ImgDataGet("current", "ScalingTable", "Vertical")
+        scl_table_size = int(scl_table_info[0]) * 4  # num of bytes we need to receive
+
+        # receive the bytes via the dataport
+        tab = b""
+        try:
+            while len(tab) < scl_table_size:  # keep receiving bytes until we received all expected bytes
+                tab += self.parent._dataport.recv(scl_table_size)
+        except socket.timeout as ex:
+            raise TimeoutError(f"Did not receive a scaling table: {ex}")
+        logging.debug("Received scaling table for time axis of Hamamatsu streak camera.")
+
+        table = numpy.frombuffer(tab, dtype=numpy.float32)  # convert to array
+        # The prefix unit varies depending on the time range (eg, ns, us), so need scale it, based
+        # on the time range of the streak unit.
+        table *= self.parent._streakunit.timeRangeFactor
+
+        return table
 
     def _getDataFromBuffer(self):
         """
@@ -520,28 +555,11 @@ class ReadoutCamera(model.DigitalCamera):
                               img_num, img_num_actual, image.shape)
 
                 # Get the scaling table to correct the time axis
-                # TODO only request scaling table if corresponding MD not available for this time range
                 if self.parent._streakunit.streakMode.value:
                     # There should be no sync problem, as we only receive images and scaling table via the dataport
-
-                    logging.debug("Request scaling table for time axis of Hamamatsu streak camera.")
                     try:
-                        # request scaling table
-                        scl_table_info = self.parent.ImgDataGet("current", "ScalingTable", "Vertical")
-                        scl_table_size = int(scl_table_info[0]) * 4  # num of bytes we need to receive
-
-                        # receive the bytes via the dataport
-                        tab = b""
-                        try:
-                            while len(tab) < scl_table_size:  # keep receiving bytes until we received all expected bytes
-                                tab += self.parent._dataport.recv(scl_table_size)
-                            table = numpy.frombuffer(tab, dtype=numpy.float32)  # convert to array
-                            table_converted = table * self.parent._streakunit.timeRangeFactor  # convert to sec
-                            self._metadata[model.MD_TIME_LIST] = table_converted
-                        except socket.timeout as msg:
-                            logging.error("Did not receive a scaling table: %s", msg)
-                            continue
-                        logging.debug("Received scaling table for time axis of Hamamatsu streak camera.")
+                        # TODO only request scaling table if corresponding MD not available for this time range
+                        self._metadata[model.MD_TIME_LIST] = self._get_time_scale()
                     except Exception:
                         logging.exception("Failed to get scaling table")
                 else:
@@ -550,7 +568,9 @@ class ReadoutCamera(model.DigitalCamera):
 
                 # update MD for the current image
                 try:
-                    self.parent._delaybox._updateTriggerRate()
+                    # FIXME: should not be hard-coded to this component.
+                    # => read RO VA triggerRate from delaybox (which is a dependency)
+                    self._metadata[model.MD_TRIGGER_RATE] = self.parent._delaybox.triggerRate.value
                 except Exception:
                     logging.exception("Failed to update trigger rate")
 
@@ -563,9 +583,9 @@ class ReadoutCamera(model.DigitalCamera):
                 is_receiving_image = False
 
         except Exception:
-            logging.exception("Hamamatsu streak camera TCP/IP image thread failed.")
+            logging.exception("Readout camera data thread failed.")
         finally:
-            logging.info("Hamamatsu streak camera TCP/IP image thread ended.")
+            logging.info("Readout camera data thread ended.")
 
     def terminate(self):
         # terminate image thread
@@ -583,38 +603,50 @@ class StreakUnit(model.HwComponent):
     Represents the Hamamatsu streak unit.
     """
 
-    def __init__(self, name, role, parent, daemon=None, **kwargs):
-        super(StreakUnit, self).__init__(name, role, parent=parent, daemon=daemon, **kwargs)  # init HwComponent
+    def __init__(self, name, role, parent, daemon=None, time_ranges: Optional[Dict[int, float]] = None, **kwargs):
+        """
+        :param time_ranges: actual value for the time ranges, if they are just arbitrary integers (ex, with synchroscan)
+        """
+
+        super().__init__(name, role, parent=parent, daemon=daemon, **kwargs)  # init HwComponent
 
         self.parent = parent
         self.location = "Streakcamera"  # don't change, internally needed by HPDTA/RemoteEx
 
         self._hwVersion = parent.DevParamGet(self.location, "DeviceName")[0]  # needs to be a string
         self._metadata[model.MD_HW_VERSION] = self._hwVersion
+        avail_params = parent.DevParamsList(self.location)
 
-        # Set parameters streak unit
-        # parent.DevParamSet(self.location, "Time Range", "1 ns")  # TODO: check what value to set
+        self._time_ranges = time_ranges or {}
+        if not isinstance(self._time_ranges, dict):
+            raise TypeError(f"time_ranges must be a dictionary int -> float (range ID -> time), but got {type(self._time_ranges)}")
+        for k, t in self._time_ranges.items():
+            if not isinstance(k, int) or not isinstance(t, numbers.Real):
+                raise TypeError(f"time_ranges must be a dictionary int -> float (range ID -> time), but got {k} -> {t}")
+
+        # Set default "good" parameters, which are not controlled/changed afterward.
+        # There are several types of streak unit (eg, single sweep, synchroscan).
+        # Symchroscan:  DevParamsList 'Time Range', 'Mode', 'Gate Mode', 'MCP Gain', 'Delay'
+        # Single Sweep: DevParamsList 'Time Range', 'Mode', 'Gate Mode', 'MCP Gain', 'Shutter', 'Trig. Mode', 'Trigger status', 'Trig. level', 'Trig. slope', 'FocusTimeOver'
+        # In order to support all of them we need to check the available parameters.
         parent.DevParamSet(self.location, "MCP Gain", 0)
         # Switch Mode to "Focus", MCPGain = 0 (implemented in RemoteEx and also here in the driver).
         parent.DevParamSet(self.location, "Mode", "Focus")
         # Resets behavior for a vertical single shot sweep: Automatic reset occurs after each sweep.
-        # parent.DevParamSet(self.location, "Trig. Mode", "Cont")  # TODO: check what value to set
+        if "Trig. Mode" in avail_params:
+            parent.DevParamSet(self.location, "Trig. Mode", "Cont")
         # [Volt] Input and indication of the trigger level for the vertical sweep.
-        # parent.DevParamSet(self.location, "Trig. level", 1)  # TODO check what value needed regarding HW
-        # parent.DevParamSet(self.location, "Trig. slope", "Rising")  # TODO: check what value to set
+        if "Trig. level" in avail_params:
+            parent.DevParamSet(self.location, "Trig. level", 1)
+        if "Trig. slope" in avail_params:
+            parent.DevParamSet(self.location, "Trig. slope", "Rising")
 
-        devparamslist = parent.DevParamsList("TD")
+        # FIXME: not available?
         # only add the shutter parameter if it is possible to control the shutter via software
-        if "Shutter" in devparamslist:
+        if "Shutter" in avail_params:
             parent.DevParamSet(self.location, "Shutter", "Closed")
-
             shutter = self.GetShutter()
             self.shutter = model.BooleanVA(shutter, setter=self._setShutter)
-
-        # Refresh regularly the values, from the hardware, starting from now
-        self._updateSettings()
-        self._va_poll = util.RepeatingTimer(5, self._updateSettings, "Streak unit settings polling")
-        self._va_poll.start()
 
         # parent.DevParamGet(self.location, "Trig. status")  # read only
 
@@ -630,21 +662,15 @@ class StreakUnit(model.HwComponent):
         self.streakMode = model.BooleanVA(mode, setter=self._setStreakMode)  # default False see set params above
 
         gain = self.GetMCPGain()
-        range_gain = self._getStreakUnitMCPGainRange()
+        range_gain = self.GetMCPGainRange()
         self.MCPGain = model.IntContinuous(gain, range_gain, setter=self._setMCPGain)
         # Note: MCPGain auto set to 0 is handled by stream not by driver except when changing from
         # "Operate" mode to "Focus" mode
 
         timeRange = self.GetTimeRange()
-        choices = set(self._getStreakUnitTimeRangeChoices())
+        choices = set(self.GetTimeRangeChoices())
         timeRange = util.find_closest(timeRange, choices)  # make sure value is in choices
         self.timeRange = model.FloatEnumerated(timeRange, choices, setter=self._setTimeRange, unit="s")
-
-        if "PLL Mode" in devparamslist:
-            pllMode = self.GetPLLMode()
-            if pllMode is not None:
-                self.phaseLocked = model.BooleanVA(pllMode, setter=self._setPLLMode)
-                setattr(self, "phaseLocked", self.phaseLocked)
 
         # a variable that stores the current timeRange conversion for e.g. the scaling table conversion
         # is set in the setter of the timeRange VA
@@ -654,17 +680,26 @@ class StreakUnit(model.HwComponent):
         self.timeRange.subscribe(self._onTimeRange, init=True)
         self.streakMode.subscribe(self._onStreakMode, init=True)
 
-        if hasattr(self, "phaseLocked"):
-            self.phaseLocked.subscribe(self._onPhaseLocked, init=True)
-
         # read-only VAs TODO: Trig. Mode, Trig. level, Trig. slope?
+
+        # Refresh regularly the values, from the hardware, starting from now
+        self._updateSettings()
+        self._va_poll = util.RepeatingTimer(5, self._updateSettings, "Streak unit settings polling")
+        self._va_poll.start()
+
+    def terminate(self):
+        self._va_poll.cancel()
+        # Put it back to the safest mode possible
+        self.parent.DevParamSet(self.location, "MCP Gain", 0)
+        self.parent.DevParamSet(self.location, "Mode", "Focus")  # streakMode = False
+        super().terminate()
 
     def _onMCPGain(self, value: int) -> None:
         """
         Called when the MCP Gain VA changes, to update the metaadata
         :param value: value to be set
         """
-        logging.debug("Reporting MCP gain %s for delay generator.", value)
+        logging.debug("Reporting MCP gain %s for streak unit.", value)
         self._metadata[model.MD_STREAK_MCPGAIN] = value
 
     def _onTimeRange(self, value: float) -> None:
@@ -672,7 +707,7 @@ class StreakUnit(model.HwComponent):
         Called when the Time Range VA changes, to update the metaadata
         :param value: value to be set
         """
-        logging.debug("Reporting time range %s for delay generator.", value)
+        logging.debug("Reporting time range %s for streak unit.", value)
         self._metadata[model.MD_STREAK_TIMERANGE] = value
 
     def _onStreakMode(self, value: bool) -> None:
@@ -680,7 +715,7 @@ class StreakUnit(model.HwComponent):
         Called when the Streak Mode VA changes, to update the metaadata
         :param value: value to be set
         """
-        logging.debug("Reporting streak mode %s for delay generator.", value)
+        logging.debug("Reporting streak mode %s for streak unit.", value)
         self._metadata[model.MD_STREAK_MODE] = value
 
     def _updateSettings(self) -> None:
@@ -705,14 +740,7 @@ class StreakUnit(model.HwComponent):
                 self.streakMode.notify(mode)
 
             # update only if the VA exists
-            if hasattr(self, phaseLocked):
-                pllMode = self.GetPLLMode()
-                if pllMode != self.phaseLocked.value:
-                    self.phaseLocked._value = pllMode
-                    self.phaseLocked.notify(pllMode)
-
-            # update only if the VA exists
-            if hasattr(self, shutter):
+            if hasattr(self, "shutter"):
                 shutter = self.GetShutter()
                 if shutter != self.shutter.value:
                     self.shutter._value = shutter
@@ -721,59 +749,21 @@ class StreakUnit(model.HwComponent):
         except Exception:
             logging.exception("Unexpected failure when polling streak unit settings")
 
-    def GetPLLMode(self):
-        """
-        Get the current value from the streak unit HW.
-        :return: (bool) current streak mode value-
-        """
-        # returns a list with a single element: ['PLL Status Value']
-        pll_mode_raw = self.parent.DevParamGet(self.location, "PLL Status")
-        if pll_mode_raw[0] == "Locked":
-            pll_mode = True
-            self.state._set_value(model.ST_RUNNING, force_write=True)
-        elif pll_mode_raw[0] == "Unlocked":
-            pll_mode = False
-        elif pll_mode_raw[0] == "Initial":
-            pll_mode = None
-        elif "error" in pll_mode_raw[0].lower():  # Typically "Error 0" or "Error 1"
-            pll_mode = None
-            self.state._set_value("Error in the phase lock loop (PLL Mode)", force_write=True)
-        else:
-            logging.warning("Unexpected phase-locked loop mode %s.", pll_mode_raw)
-            pll_mode = None
-
-        return pll_mode
-
-    def _setPLLMode(self, value: bool) -> bool:
-        """
-        Updates the PLL Mode VA.
-        :param value: value to be set
-        :return: (bool) current PLL mode
-        """
-        if value:
-            self.parent.DevParamSet(self.location, "PLL Mode", "Locked")
-        else:
-            self.parent.DevParamSet(self.location, "PLL Mode", "Unlocked")
-        logging.debug("Phase-locked loop mode is set to: %s", value)
-
-        return value
-
     def GetShutter(self) -> bool:
         """
         Get the current value from the trigger delay HW (RemoteEx: delay A).
         :return: (bool) current state of the shutter
         """
         shutter_raw = self.parent.DevParamGet(self.location, "Shutter")  # returns a list
+        logging.debug("Shutter state is %s.", shutter_raw)  # TODO: document what the list looks like
+
         if shutter_raw[0] == "Closed":
             shutter = True
-            self.state._set_value(model.ST_RUNNING, force_write=True)
         elif shutter_raw[0] == "Open":
             shutter = False
         else:
-            logging.warning("Unexpected shutter mode %s. Opening the shutter...", shutter_raw)
-            self.state._set_value(model.ST_RUNNING, force_write=False)
+            logging.warning("Unexpected shutter mode %s. Assuming it's open.", shutter_raw[0])
             shutter = False
-            logging.warning("Shutter is opened.")
 
         return shutter
 
@@ -813,97 +803,76 @@ class StreakUnit(model.HwComponent):
         :return: (bool) current streak mode
         """
         if not value:
+            # For safety, always set the get to the minimum when not sweeping
             self.MCPGain.value = 0
             self.parent.DevParamSet(self.location, "Mode", "Focus")
         else:
             self.parent.DevParamSet(self.location, "Mode", "Operate")
-        logging.debug("Reporting mode %s for streak unit.", value)
-        self._metadata[model.MD_STREAK_MODE] = value
 
         return value
 
-    def GetMCPGain(self):
+    def GetMCPGain(self) -> int:
         """
         Get the current value from the streak unit HW.
-        :return: (int) current MCPGain value
+        :return: current MCPGain value
         """
         MCPGain_raw = self.parent.DevParamGet(self.location, "MCP Gain")  # returns a list
         MCPGain = int(MCPGain_raw[0])
 
         return MCPGain
 
-    def _setMCPGain(self, value):
+    def _setMCPGain(self, value: int) -> int:
         """
         Updates the MCPGain VA.
-        :param value: (int) value to be set
-        :return: (int) current MCPGain
+        :param value: value to be set
+        :return: current MCPGain
         """
         self.parent.DevParamSet(self.location, "MCP Gain", value)
-        logging.debug("Reporting MCP gain %s for streak unit.", value)
-        self._metadata[model.MD_STREAK_MCPGAIN] = value
 
         return value
 
-    def _getStreakUnitMCPGainRange(self):
+    def GetMCPGainRange(self) -> Tuple[int, int]:
         """
         Get range for streak unit MCP gain.
-        :return: (tuple of int) range for MCP gain values
+        :return: min/max of MCP gain values
         """
         # First 5 values see CamParamInfoEx.
         MCPGainRange_raw = self.parent.DevParamInfoEx(self.location, "MCP Gain")[5:]
-        MCPGainRange = (int(MCPGainRange_raw[0]),
-                        int(MCPGainRange_raw[1]))
+        MCPGainRange = (int(MCPGainRange_raw[0]), int(MCPGainRange_raw[1]))
 
         return MCPGainRange
 
-    def GetTimeRange(self):
-        """
-        Get the current value from the streak unit HW.
-        :return: (float) current time range value
-        """
-        timeRange = self._getStreakUnitTimeRange()
-
-        return timeRange
-
-    def _setTimeRange(self, value):
+    def _setTimeRange(self, value: float) -> float:
         """
         Updates the timeRange VA.
-        :param value: (float) value to be set
-        :return: (float) current time range
+        :param value: value to be set (s)
+        :return: actual time range (s)
         """
-        self._setStreakUnitTimeRange(self.location, value)
-        logging.debug("Reporting time range %s for streak unit.", value)
-        self._metadata[model.MD_STREAK_TIMERANGE] = value
-
-        # set corresponding trigger delay
-        # tr2d = self.parent._delaybox._metadata.get(model.MD_TIME_RANGE_TO_DELAY)
-        # if tr2d:
-        #     key = util.find_closest(value, tr2d.keys())
-        #     if util.almost_equal(key, value):
-        #         self.parent._delaybox.triggerDelay.value = tr2d[key]
-        #     else:
-        #         logging.warning("Time range %s is not a key in MD for time range to "
-        #                         "trigger delay calibration" % value)
-
+        self.SetTimeRange(self.location, value)
         return value
 
-    def _setStreakUnitTimeRange(self, location, time_range):
+    def SetTimeRange(self, location, time_range):
         """
         Sets the time range for the streak unit.
         Converts the value in sec into a for RemoteEx readable format.
         :param location: (str) see DevParamGet
         :param time_range: (float) time range for one sweep in sec
         """
-        # try:
-        #     time_range_raw = self.parent.convertTime2Unit(time_range)
-        #     self._setTimeRangeFactor(time_range)
-        # except Exception:
-        #     raise ValueError("Time range of %s sec for one sweep is not supported for streak unit." % time_range)
+        try:
+            if self._time_ranges:
+                # Convert from time to time_id
+                time_range_raw = self._time_to_time_id(time_range)
+            else:
+                # Convert from time to string (e.g. "1.0 ns")
+                time_range_raw = self.parent.convertTime2Unit(time_range)
 
-        # self.parent.DevParamSet(location, "Time Range", time_range_raw)
-        self.parent.DevParamSet(location, "Time Range", "1")
+            self._setTimeRangeFactor(time_range)
+        except Exception:
+            raise ValueError("Time range of %s sec for one sweep is not supported for streak unit." % time_range)
 
-    def _getStreakUnitTimeRangeChoices(self):
+        self.parent.DevParamSet(location, "Time Range", time_range_raw)
+
+    def GetTimeRangeChoices(self):
         """
         Get choices for streak unit time range. Values are in order.
         First six values see CamParamInfoEx.
@@ -913,22 +882,25 @@ class StreakUnit(model.HwComponent):
         choices = []
         for choice in choices_raw:
             choice_raw = choice.split(" ")
-            if len(choice_raw) == 1:
-                choices.append(int(choice_raw[0]))
+            if len(choice_raw) == 1:  # No unit -> typically it's just a number (from 1 to 5)
+                time_id = int(choice_raw[0])
+                t = self._time_id_to_time(time_id)
             else:
-                choices.append(self.parent.convertUnit2Time(choice_raw[0], choice_raw[1]))
+                t = self.parent.convertUnit2Time(choice_raw[0], choice_raw[1])
+            choices.append(t)
 
         return choices
 
-    def _getStreakUnitTimeRange(self):
+    def GetTimeRange(self) -> float:
         """
         Gets the time range of the streak unit.
         Converts the provided value received from RemoteEx into sec.
         :return: (float) current time range for one sweep in sec
         """
         time_range_raw = self.parent.DevParamGet(self.location, "Time Range")[0].split(" ")
-        if len(time_range_raw) == 1:
-            time_range = int(time_range_raw[0])
+        if len(time_range_raw) == 1:  # No unit -> typically it's just a number (from 1 to 5)
+            time_id = int(time_range_raw[0])
+            time_range = self._time_id_to_time(time_id)
         else:
             time_range = self.parent.convertUnit2Time(time_range_raw[0], time_range_raw[1])
 
@@ -947,9 +919,30 @@ class StreakUnit(model.HwComponent):
             raise ValueError("Cannot calculate time range conversion factor. "
                              "Time range of value %s not supported" % value)
 
-    def terminate(self):
-        self.MCPGain.value = 0
-        self.streakMode.value = False
+    def _time_id_to_time(self, time_id: int) -> float:
+        """
+        Convert from an arbitrary time range ID to time (in s), based on the "time_ranges" specified
+        by the user.
+        :param time_id: the time range ID, as used by the streak unit
+        :return: the time in s
+        :raises: KeyError if time_id is not in the known time ranges
+        """
+        try:
+            return self._time_ranges[time_id]
+        except KeyError:
+            raise KeyError(f"Time ID {time_id} is not in time_ranges")
+
+    def _time_to_time_id(self, time_phy: float) -> int:
+        """
+        Convert from time (in s) to an arbitrary time range ID.
+        :param time_phy: time in s
+        :return: the time ID as used by the streak unit
+        :raises: KeyError if time_phy is not in the known time ranges
+        """
+        for tid, t in self._time_ranges.items():
+            if util.almost_equal(t, time_phy):
+                return tid
+        raise KeyError(f"Time {time_phy} s is not in time_ranges")
 
 
 class DelayGenerator(model.HwComponent):
@@ -957,49 +950,104 @@ class DelayGenerator(model.HwComponent):
     Represents the delay generator.
     """
 
-    def __init__(self, name, role, parent, daemon=None, **kwargs):
-        super(DelayGenerator, self).__init__(name, role, parent=parent, daemon=daemon, **kwargs)  # init HwComponent
+    def __init__(self, name, role, parent, daemon=None, streak_unit=None, **kwargs):
+        """
+        :param streak_unit: a streak unit Component, which has a timeRange VA. When this VA changes,
+        the trigger delay VA of the delay generator is updated, based on the MD_TIME_RANGE_TO_DELAY
+        metadata.
+        """
+        super().__init__(name, role, parent=parent, daemon=daemon, **kwargs)
 
         self.parent = parent
+        self._streak_unit = streak_unit
         self.location = "Delaybox"  # don't change, internally needed by HPDTA/RemoteEx
 
         self._hwVersion = parent.DevParamGet(self.location, "DeviceName")[0]   # needs to be a string
         self._metadata[model.MD_HW_VERSION] = self._hwVersion
 
+        avail_params = parent.DevParamsList(self.location)
+
+        # FIXME: on synchroscan unit, the parameters are quite different.
+        # On synchroscan, DevParamsList: 'Delay Time', 'Lock Mode', 'Device Status'
+        # On DC645: DevParamsList: 'Delay A', ... 'Delay H', TODO
         # Set parameters delay generator
-        parent.DevParamSet(self.location, "Setting", "M1")  # TODO might be enough and don't need the rest...check!!
-        parent.DevParamSet(self.location, "Trig. Mode", "Ext. rising")  # Note: set to "Int." for testing without SEM
-        parent.DevParamSet(self.location, "Repetition Rate", 1000000)  # [0.001, 10000000] # read-only for Ext. rising
-        parent.DevParamSet(self.location, "Delay A", 0)
-        parent.DevParamSet(self.location, "Delay B", 0.00000002)
-        parent.DevParamSet(self.location, "Burst Mode", "Off")
+        # TODO: don't fail if the parameters are not available
+        if "Setting" in avail_params:
+            parent.DevParamSet(self.location, "Setting", "M1")  # TODO might be enough and don't need the rest...check!!
+        if "Trig. Mode" in avail_params:
+            parent.DevParamSet(self.location, "Trig. Mode", "Ext. rising")  # Note: set to "Int." for testing without SEM
+        # FIXME: why set the trigger rate, if it's read-only?
+        if "Repetition Rate" in avail_params:
+            parent.DevParamSet(self.location, "Repetition Rate", 1000000)  # [0.001, 10000000] # read-only for Ext. rising
+        # Note: this is legacy code, to maintain the behavior of the old version
+        # A better way would be to use the "properties" in the microscope file, to set the triggerDelay (Delay A)
+        # and delayB values just after initialisation.
+        if "Delay A" in avail_params:
+            parent.DevParamSet(self.location, "Delay A", 0)
+        if "Delay B" in avail_params:
+            parent.DevParamSet(self.location, "Delay B", 0.00000002)
+        if "Burst Mode" in avail_params:
+            parent.DevParamSet(self.location, "Burst Mode", "Off")
 
         # Note: trigger rate (repetition rate) corresponds to the ebeam blanking frequency (read only in RemoteEx)
-        self._metadata[model.MD_TRIGGER_RATE] = int(self.parent.DevParamGet(self.location, "Repetition Rate")[0])
+        #self._metadata[model.MD_TRIGGER_RATE] = int(self.parent.DevParamGet(self.location, "Repetition Rate")[0])
+        if "Repetition Rate" in avail_params:
+            self.triggerRate = model.FloatVA(0, unit="Hz", readonly=True, getter=self.GetTriggerRate)
+
+        # VAs
+        self._subscribers = []
+
+        for rx_param, va_name in zip(DELAY_NAME_REMOTE_EX, DELAY_NAME_VAS):
+            # do not assign VA if RemoteEx param does not exist
+            if rx_param not in avail_params:
+                continue
+
+            delay = self.GetDelayByName(rx_param)
+            range_delay = self.GetDelayRangeByName(rx_param)
+
+            # Create a VA, with a corresponding setter function
+            delay_setter = functools.partial(self._setDelayByName, rx_param)
+            self._subscribers.append(delay_setter)  # keep a ref to delay_setter so that it's not garbage collected
+            delay_va = model.FloatContinuous(delay, range_delay, setter=delay_setter, unit="s")
+            setattr(self, va_name, delay_va)
+
+        if hasattr(self, "triggerDelay"):  # Typically, it has Delay A
+            self.triggerDelay.subscribe(self._onTriggerDelay, init=True)
+        else:
+            logging.warning("No triggerDelay VA available in delay generator.")
+
+        # FIXME: where is phase lock controlled? Typically, only in synchroscan. Streakunit or delaybox? "Lock Mode"
+        # => This is on the delay box
+        # Expected only the synchroscan: to control the phase lock (ie, the sweep is synchronized on the trigger signal)
+        if "PLL Mode" in avail_params:
+            pllMode = self.GetPLLMode()
+            self.phaseLocked = model.BooleanVA(pllMode, setter=self._setPLLMode)
 
         # Refresh regularly the values, from the hardware, starting from now
         self._updateSettings()
         self._va_poll = util.RepeatingTimer(5, self._updateSettings, "Delay generator settings polling")
         self._va_poll.start()
 
-        # VAs
-        self._subscribers = []
-        devparamslist = parent.DevParamsList()
+        if streak_unit:
+            streak_unit.timeRange.subscribe(self._on_time_range)
 
-        for i in range(0,7):
-            if DELAY_NAME_REMOTE_EX[i] not in devparamslist:
-                continue  # do not assign VA if RemoteEx param does not exist
+    def _on_time_range(self, time_range: float):
+        # set corresponding trigger delay
+        tr2d = self._metadata.get(model.MD_TIME_RANGE_TO_DELAY)
+        if tr2d:
+            key = util.find_closest(time_range, tr2d.keys())
+            if util.almost_equal(key, time_range):
+                self.triggerDelay.value = tr2d[key]
             else:
-                delay = self.GetDelayByName(DELAY_NAME_REMOTE_EX[i])
-                range_delay = self.GetDelayRangeByName(DELAY_NAME_REMOTE_EX[i])
+                logging.warning("Time range %s is not a key in MD for time range to "
+                                "trigger delay calibration" % time_range)
 
-                delay_setter = functools.partial(self._setDelayByName, DELAY_NAME_REMOTE_EX[i])
-                self._subscribers.append(delay_setter)  # keep a ref to delay_setter so that it's not garbage collected
-                delay_va = model.FloatContinuous(delay, range_delay, setter=delay_setter, unit="s")
-                setattr(self, DELAY_NAME_VAS[i], delay_va)
-
-        if hasattr(self, "triggerDelay"):
-            self.triggerDelay.subscribe(self._onTriggerDelay, init=True)
+    def terminate(self):
+        self._va_poll.cancel()
+        if self._streak_unit:
+            self._streak_unit.timeRange.unsubscribe(self._on_time_range)
+            self._streak_unit = None
+        super().terminate()
 
     # override HwComponent.updateMetadata
     def updateMetadata(self, md):
@@ -1014,7 +1062,7 @@ class DelayGenerator(model.HwComponent):
                                      "Please check the calibration file for the trigger delay."
                                      % (delay, timeRange, self.triggerDelay.range))
 
-        super(DelayGenerator, self).updateMetadata(md)
+        super().updateMetadata(md)
 
     def _onTriggerDelay(self, value: float):
         """
@@ -1024,16 +1072,26 @@ class DelayGenerator(model.HwComponent):
         logging.debug("Reporting trigger delay %s for delay generator.", value)
         self._metadata[model.MD_TRIGGER_DELAY] = value
 
-    def _updateTriggerRate(self):
+    # def _updateTriggerRate(self):
+    #     """
+    #     Get the trigger rate (repetition) rate from the delay generator and updates the MD.
+    #     The Trigger rate corresponds to the ebeam blanking frequency. As the delay
+    #     generator is operated "external", the trigger rate is a read-only value.
+    #     Called whenever an image arrives.
+    #     """
+    #     triggerRate_raw = self.parent.DevParamGet(self.location, "Repetition Rate")  # returns a list
+    #     triggerRate = float(triggerRate_raw[0])
+    #     self._metadata[model.MD_TRIGGER_RATE] = triggerRate
+
+    def GetTriggerRate(self) -> float:
         """
-        Get the trigger rate (repetition) rate from the delay generator and updates the MD.
+        Get the trigger rate (repetition) rate from the delay generator.
         The Trigger rate corresponds to the ebeam blanking frequency. As the delay
         generator is operated "external", the trigger rate is a read-only value.
-        Called whenever an image arrives.
+        :return: (float) current trigger rate (Hz)
         """
         triggerRate_raw = self.parent.DevParamGet(self.location, "Repetition Rate")  # returns a list
-        triggerRate = float(triggerRate_raw[0])
-        self._metadata[model.MD_TRIGGER_RATE] = triggerRate
+        return float(triggerRate_raw[0])
 
     def GetDelayByName(self, delay_name: str):
         """
@@ -1054,15 +1112,15 @@ class DelayGenerator(model.HwComponent):
         :return: (float) current trigger delay value
         """
         self.parent.DevParamSet(self.location, delay_name, value)
-        logging.debug("Reporting trigger delay %s for delay generator.", value)
+        logging.debug("Setting %s to %s on delay generator.", delay_name, value)
 
         return self.GetDelayByName(delay_name)
 
-    def GetDelayRangeByName(self, delay_name: str):
+    def GetDelayRangeByName(self, delay_name: str) -> Tuple[float, float]:
         """
         Get the range allowed for delay A. RemoteEx provides a negative minimum,
         which is internally set to zero whenever a negative delay is requested.
-        :return: (tuple) the trigger delay range
+        :return: the trigger delay min/max
         """
         min_time = 0
         max_time = float(self.parent.DevParamInfoEx(self.location, delay_name)[-1])
@@ -1071,21 +1129,70 @@ class DelayGenerator(model.HwComponent):
 
         return range_time
 
+    def GetPLLMode(self):
+        """
+        Get the current value of the phase locked loop mode. That is typically only available
+        on the synchroscan streak unit. This indicates that the sweep is synchronized on the
+        trigger signal.
+        :return: (bool) current
+        """
+        # returns a list with a single element: ['PLL Status Value']
+        pll_mode_raw = self.parent.DevParamGet(self.location, "PLL Status")
+        # FIXME: update state if no error
+        if pll_mode_raw[0] == "Locked":
+            pll_mode = True
+            self.state._set_value(model.ST_RUNNING, force_write=True)
+        elif pll_mode_raw[0] == "Unlocked":
+            pll_mode = False
+            self.state._set_value(model.ST_RUNNING, force_write=True)
+        elif pll_mode_raw[0] == "Initial":
+            pll_mode = False
+        elif "error" in pll_mode_raw[0].lower():  # Typically "Error 0" or "Error 1"
+            pll_mode = False
+            self.state._set_value(model.HwError(f"Failed lock on phase: {pll_mode_raw[0]}"), force_write=True)
+        else:
+            logging.warning("Unexpected phase-locked loop mode %s.", pll_mode_raw)
+            pll_mode = False
+
+        return pll_mode
+
+    def _setPLLMode(self, value: bool) -> bool:
+        """
+        Updates the phase locked loop mode.
+        :param value: True if the PLL mode should be activated, False otherwise.
+        :return: new PLL mode
+        """
+        self.parent.DevParamSet(self.location, "PLL Mode", "Locked" if value else "Unlocked")
+        logging.debug("Phase-locked loop mode is set to: %s", value)
+
+        return value
+
     def _updateSettings(self) -> None:
         """
         Read all the current delay generator settings from the RemoteEx and reflect them on the VAs
         """
         logging.debug("Updating streak unit settings")
         try:
-            DELAY_NAME_REMOTE_EX = ["Delay A", "Delay B", "Delay C", "Delay D", "Delay E", "Delay F", "Delay G", "Delay H"]
-            DELAY_NAME_VAS = ["triggerDelay", "delayB", "delayC", "delayD", "delayE", "delayF", "delayG", "delayH"]
-            for i, delayva in enumerate(DELAY_NAME_VAS):
-                if hasattr(self, delayva):
-                    delayva = getattr(self, DELAY_NAME_VAS[i])
-                    delayre = self.GetDelayByName(DELAY_NAME_REMOTE_EX[i])
-                    if delayva._value != delayre:
-                        delayva = getattr(self, delayva)
-                        delayva._value = delayre
+            if hasattr(self, "triggerRate"):
+                # As there is a getter, just reading the VA updates ._value, so need to use the
+                # direct function to check the value has changed, and notify its change.
+                trigger_rate = self.GetTriggerRate()
+                if trigger_rate != self.triggerRate._value:
+                    self.triggerRate._set_value(trigger_rate, force_write=True)
+
+            if hasattr(self, "phaseLocked"):
+                pllMode = self.GetPLLMode()
+                if pllMode != self.phaseLocked.value:
+                    self.phaseLocked._value = pllMode
+                    self.phaseLocked.notify(pllMode)
+
+            for rxname, vaname in zip(DELAY_NAME_REMOTE_EX, DELAY_NAME_VAS):
+                if hasattr(self, vaname):
+                    va = getattr(self, vaname)
+                    rx_val = self.GetDelayByName(rxname)
+                    if va._value != rx_val:
+                        va._value = rx_val
+                        va.notify(rx_val)
 
         except Exception:
             logging.exception("Unexpected failure when polling delay generator settings")
@@ -1095,16 +1202,22 @@ class StreakCamera(model.HwComponent):
     """
     Represents Hamamatsu readout camera for the streak unit.
     Client to connect to HPD-TA software via RemoteEx.
+    Note: the RemoteEx software needs to be running on the streak camera computer. Typically, this
+    can be done by placing it in the autostart folder.
     """
 
-    # def __init__(self, name, role, port, host, children=None, dependencies=None, daemon=None, **kwargs):
-    def __init__(self, name, role, port, host, settings_ini=None, children=None, dependencies=None, daemon=None, **kwargs):
+    def __init__(self, name, role, port: int, host: str, settings_ini: Optional[str] = None,
+                 children=None, dependencies=None, daemon=None, **kwargs):
         """
         Initializes the device.
-        :param host: (str) IP-adress or hostname
-        :param port: (int) port for sending/receiving commands
+        :param port: port for sending/receiving commands
+        :param host: IP-adress or hostname
+        :param settings_ini: path to the INI file for HPDTA, which defines which hardware is initialized
+        If None, the default INI file is used.
+        :param children: should contain a "streakunit", a "readoutcam" (optional), and a "delaybox" (optional)
+        :param dependencies: should have a "spectrograph" for the readout camera, to obtain the wavelength metadata
         """
-        super(StreakCamera, self).__init__(name, role, dependencies=dependencies, daemon=daemon, **kwargs)
+        super().__init__(name, role, dependencies=dependencies, daemon=daemon, **kwargs)
 
         port_d = port + 1  # the port number to receive the image data
         self.host = host
@@ -1112,9 +1225,6 @@ class StreakCamera(model.HwComponent):
         self.port_d = port_d
 
         self._lock_command = threading.Lock()
-
-        # TODO start RemoteEx via SSH
-        # or TODO autostart of RemoteEx when turning on hamamatsu pc?
 
         # connect to readout camera
         try:
@@ -1130,21 +1240,13 @@ class StreakCamera(model.HwComponent):
         self.queue_img = queue.Queue(maxsize=0)
 
         self.should_listen = True  # used in readCommandResponse thread
-        self._getReadoutCamInfo = False  # nasty trick to get cam info
 
         # start thread, which keeps reading the commandport response continuously
         self._start_receiverThread()
 
         # Note: start HPDTA after initializing queue and command and receiver treads
-        # but before image thread and initializing children!
-
-        # TODO check if already running....otherwise start multiple apps
-        # TODO  -> in acquisition mode it looks like it does not start a second app, but also does not report that
-        # TODO -> in processing mode it is possible to start multiple apps....
-        # TODO is there a clever way for checking if app still running? Seems to be no command available to check
-        # TODO appEnd only works for the last opened window
-        # TODO want to check if we want to start app invisible (sVisible = False)
-
+        # but before image thread and initializing children.
+        #
         self.AppStart(settings_ini)  # start HPDTA software  # Note: comment out for testing in order to not start a new App
         try:
             children = children or {}
@@ -1157,15 +1259,17 @@ class StreakCamera(model.HwComponent):
                 self.children.value.add(self._readoutcam)  # add readoutcam to children-VA
             else:
                 logging.info("No readout camera provided.")
+
             try:
                 ckwargs = children["streakunit"]
             except Exception:
                 raise ValueError("Required child streakunit not provided")
             self._streakunit = StreakUnit(parent=self, daemon=daemon, **ckwargs)
             self.children.value.add(self._streakunit)  # add streakunit to children-VA
+
             if "delaybox" in children.keys():
                 ckwargs = children["delaybox"]
-                self._delaybox = DelayGenerator(parent=self, daemon=daemon, **ckwargs)
+                self._delaybox = DelayGenerator(parent=self, daemon=daemon, streak_unit=self._streakunit, **ckwargs)
                 self.children.value.add(self._delaybox)  # add delaybox to children-VA
             else:
                 logging.info("No delaybox provided.")
@@ -1321,9 +1425,10 @@ class StreakCamera(model.HwComponent):
                     logging.debug("Response not about function %s, will wait some more time.", func)
                     continue  # continue listening to receive the correct response for the sent command or timeout
 
-                logging.debug("Interpreted response: %s.", response)
+                logging.debug("Command %s got response: %s, %s.", func, error_code, rargs)
                 if error_code:  # != 0, response corresponds to command, but an error occurred
-                    logging.error(RemoteExError(error_code))
+                    # FIXME: pass the rargs directly to RemoteExError, which can contain extra info
+                    logging.error("Function %s raised: %s, %s", rfunc, RemoteExError(error_code), rargs)
                     raise RemoteExError(error_code)
                 else:  # successfully executed command and return message
                     return rargs
@@ -1336,14 +1441,14 @@ class StreakCamera(model.HwComponent):
         or .queue_img (for messages related to the images).
         """
         try:
-            responses = b""  # received data not yet processed
+            responses = ""  # received data not yet processed
 
             while self.should_listen:
                 try:
                     received = self._commandport.recv(4096)  # buffersize should be small value of power 2 (4096)
                 except socket.timeout:
-                    # when socket timed out (receiving no response)
-                    logging.debug("Timeout on the socket, will wait for more data packets.")
+                    # no data received yet, nothing to worry, just continue
+                    # logging.debug("Timeout on the socket, will wait for more data packets.")
                     continue
                 if not received:
                     # TODO: this seems to get triggered "sometimes", and then
@@ -1355,56 +1460,44 @@ class StreakCamera(model.HwComponent):
                     continue
 
                 logging.debug("Received: '%s'", to_str_escape(received))
-                responses += received
+                responses += received.decode("latin1")
 
-                resp_splitted = responses.split(b"\r")
+                # Sometimes the answer comes in multiple parts, separated by \r\n, but cut on \r.
+                # so need to wait a tiny bit longer (<3ms) to check if the response is continuing.
+                for i in range(100):
+                    time.sleep(3e-3)
+                    readable, _, _ = select.select([self._commandport], [], [], 0)  # wait max 0s.
+                    if not readable:  # No more data available => good to process it
+                        break
+                    try:
+                        received = self._commandport.recv(4096)
+                        logging.debug("Received extra: '%s'", to_str_escape(received))
+                        responses += received.decode("latin1")
+                    except Exception as ex:  # No extra data, that's unexpected, but fine!
+                        logging.debug("No more data available while so was supposed to be there: %s", ex)
+                        break
+                else:
+                    logging.warning("Responses keep coming in, will process the data received so far.")
+
+                # Separate commands on \r... but not \r\n (which is used to separate lines inside a response)
+                # Note: in reality, it's even more muddy, because some error messages may contain raw
+                # data which can have \r inside without any escaping. We could try to detect that the
+                # \r is not followed by a number... but for now we don't care about such error messages,
+                # so just let them be handled later by detecting they are not a normal response.
+                resp_splitted = re.split(r"\r(?!\n)", responses)
                 # split responses, overwrite var responses with the remaining messages (usually empty)
                 resp_splitted, responses = resp_splitted[:-1], resp_splitted[-1]
 
                 for msg in resp_splitted:
-                    msg_splitted = msg.decode("latin1").split(",")
+                    msg_splitted = msg.split(",")
 
                     try:
                         error_code, rfunc, rargs = int(msg_splitted[0]), msg_splitted[1], msg_splitted[2:]
-                    except (TypeError, ValueError, IOError):
-                        logging.warning("Received response, which is not according to the known protocol.")
-                        continue  # return to try-statement and start receiving again
+                    except (TypeError, ValueError, IOError) as ex:
+                        logging.warning("Skipping unexpected response (%s): %s", ex, to_str_escape(msg))
+                        continue
 
-                    if self._getReadoutCamInfo:
-                        # HACK: command CamParamGet("Setup", "CameraInfo") behaves differently than all other commands.
-                        # Use nasty trick to work around for this command.
-                        # This command first receives the first data until \r and then additional information.
-                        # Currently the total information always has 5 lines:
-                        # rargs: 'OrcaFlash 4.0 V3'
-                        # additional_info:
-                        # '\nProduct number: C13440-20C\r\nSerial number: 301730\r\nFirmware: 4.20.B\r\nVersion: 4.20.B03-A19-B02-4.02\r'
-                        # processed output:
-                        # 'OrcaFlash 4.0 V3'
-                        # 'Product number: C13440-20C'
-                        # 'Serial number: 301730'
-                        # 'Firmware: 4.20.B'
-                        # 'Version: 4.20.B03-A19-B02-4.02'
-                        # Note: It is not clear whether rargs might sometimes already contain parts of additional info
-                        additional_info = responses
-                        timeout = 1  # wait for 1sec, if not receiving all additional info in that time: skip it
-                        start = time.time()
-                        while time.time() < start + timeout:
-                            try:
-                                # continue listening as there is additional info coming in
-                                additional_info += self._commandport.recv(4096)   # receive more data
-                            except Exception:
-                                break
-                            logging.debug("Received: '%s'", to_str_escape(additional_info))
-
-                        try:
-                            additional_info = additional_info.decode("latin1").split("\r")
-                            for item in additional_info[:-1]:
-                                msg_splitted.append(item.strip("\n"))
-                            if additional_info[-1]:
-                                logging.warning("Discarding data after CameraInfo '%s'", additional_info[-1])
-                        except Exception:
-                            logging.exception("Failure while decoding readout camera information.")
-                        self._getReadoutCamInfo = False
+                    logging.debug("Interpreted response: %s", msg_splitted)
 
                     if error_code in (4, 5):
                         # A new image is available on the dataport => Send to the special queue
@@ -1454,7 +1547,9 @@ class StreakCamera(model.HwComponent):
 
     def Appinfo(self):
         """Returns the current application type. Can be executed even if application (HPDTA or HiPic)
-        have not been started yet."""
+        have not been started yet.
+        Not to be confused with "AppInfo"! (upper case "I")
+        """
         return self.sendCommand("Appinfo", "type")
 
     def Stop(self):
@@ -1472,16 +1567,24 @@ class StreakCamera(model.HwComponent):
 
     # === Application commands ========================================================
 
-    def AppStart(self, settings_ini=None): # , settings_ini):
-        """Start RemoteEx. Function names and args need to be strings."""
+    def AppStart(self, ini_file: str = None):
+        """
+        Start RemoteEx. If the application is already running, it will not do anything.
+        Blocks until the application is started.
+        :param ini_file: (str) path to the INI file for HPDTA, default is HDPTA8.INI
+        """
+        # The function accepts up to 4 arguments: fVisible, sINIFile, fNoDialogs, iEncoding
         logging.debug("Starting RemoteEx App.")
-        # Note: "1": App starts visible (use 0 for invisible)
-        if settings_ini:
-            self.sendCommand("AppStart", "1", settings_ini, timeout=30)
-        else:
+        if ini_file is None:
             # need ~15 s when starting App -> use larger timeout
             self.sendCommand("AppStart", timeout=30)
-        # self.sendCommand("AppStart", timeout=30)
+        else:
+            # First argument: fVisible: 0 = invisible, 1 = visible (default)
+            # Second argument: ini file (Default is HDPTA8.INI). Warning INI != HWP (although the
+            # HWP file also follows the INI syntax, so it will not complain!). However, the INI file
+            # points towards the hardware profile (HWprofile) file.
+            logging.debug("Starting with ini file: %s", ini_file)
+            self.sendCommand("AppStart", "1", ini_file, timeout=30)
 
     def AppEnd(self):
         """Close RemoteEx."""
@@ -1490,6 +1593,7 @@ class StreakCamera(model.HwComponent):
 
     def AppInfo(self, parameter):
         """Returns information about the application.
+        Not to be confused with "Appinfo"! (lower case "i")
         :param parameter: (str) Date, Version, Directory, Title, Titlelong, ProgDataDir.
         :return (str): message"""
         return self.sendCommand("AppInfo", parameter)

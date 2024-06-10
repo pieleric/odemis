@@ -28,23 +28,51 @@ import unittest
 
 from cam_test_abs import VirtualTestCam, VirtualTestSynchronized
 
-logging.getLogger().setLevel(logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG,
+                    format="%(asctime)s  %(levelname)-7s %(module)s:%(lineno)d %(message)s",
+                    force=True,
+                    )
+
+
+# Export TEST_NOHW = 1 to prevent using the real hardware
+TEST_NOHW = (os.environ.get("TEST_NOHW", "0") != "0")  # Default to Hw testing
+
+HOST_ADDRESS = "192.168.5.10"
+# HOST_ADDRESS = "192.168.56.103"
 
 CLASS_STREAKCAM = hamamatsurx.StreakCamera
 
 # arguments used for the creation of basic components
 CONFIG_READOUTCAM = {"name": "ReadoutCamera", "role": "readoutcam"}
 CONFIG_STREAKUNIT = {"name": "StreakUnit", "role": "streakunit"}
+CONFIG_SYNCHROSCAN = {"name": "StreakUnit Synchroscan", "role": "streakunit",
+                      # As seen in C16910_M16911-01_Flash40.txt
+                      # TODO: is that the right way to read this file?
+                      "time_ranges": {
+                          1: 6.901059E-02 * 1e-12,  # ~70 fs
+                          2: 0.2211963 * 1e-12,  # ~220 fs (3x slower)
+                          3: 0.6798264 * 1e-12,  # ~680 fs (3x slower)
+                          4: 1.583464 * 1e-12,  # (2x slower)
+                          5: 3.57101 * 1e-12,  # (2x slower)
+                      },
+}
 CONFIG_DELAYBOX = {"name": "Delaybox", "role": "delaybox"}
 
 STREAK_CHILDREN = {"readoutcam": CONFIG_READOUTCAM, "streakunit": CONFIG_STREAKUNIT, "delaybox": CONFIG_DELAYBOX}
+STREAK_CHILDREN_SYNC = {"readoutcam": CONFIG_READOUTCAM, "streakunit": CONFIG_SYNCHROSCAN, "delaybox": CONFIG_DELAYBOX}
 STREAK_CHILDREN_NO_DELAYBOX = {"readoutcam": CONFIG_READOUTCAM, "streakunit": CONFIG_STREAKUNIT}
 STREAK_CHILDREN_NO_READOUT_CAM = {"streakunit": CONFIG_STREAKUNIT, "delaybox": CONFIG_DELAYBOX}
 
-KWARGS_STREAKCAM = dict(name="streak cam", role="ccd", host="172.16.4.2", port=1001, children=STREAK_CHILDREN)
-KWARGS_STREAKCAM_NO_DELAYBOX = dict(name="streak cam", role="ccd", host="172.16.4.2", port=1001,
+KWARGS_STREAKCAM = dict(name="streak cam", role="ccd", host=HOST_ADDRESS, port=1001,
+                        settings_ini="C:\\ProgramData\\Hamamatsu\\HPDTA\\hpdta-single-sweep.ini",
+                        children=STREAK_CHILDREN)
+KWARGS_STREAKCAM_SYNC = dict(name="streak cam", role="ccd", host=HOST_ADDRESS, port=1001,
+                             settings_ini="C:\\ProgramData\\Hamamatsu\\HPDTA\\hpdta-synchroscan.ini",
+                             children=STREAK_CHILDREN_SYNC)
+KWARGS_STREAKCAM_NO_DELAYBOX = dict(name="streak cam", role="ccd", host=HOST_ADDRESS, port=1001,
+                                    settings_ini="C:\\ProgramData\\Hamamatsu\\HPDTA\\hpdta-single-sweep.ini",
                                     children=STREAK_CHILDREN_NO_DELAYBOX)
-KWARGS_STREAKCAM_NO_READOUT_CAM = dict(name="streak cam", role="ccd", host="172.16.4.2", port=1001,
+KWARGS_STREAKCAM_NO_READOUT_CAM = dict(name="streak cam", role="ccd", host=HOST_ADDRESS, port=1001,
                                        children=STREAK_CHILDREN_NO_READOUT_CAM)
 
 # test with spectrograph
@@ -52,9 +80,6 @@ CLASS_SPECTROGRAPH = andorshrk.Shamrock
 KWARGS_SPECTROGRAPH = dict(name="sr193", role="spectrograph", device="fake",
                        slits={1: "slit-in", 3: "slit-monochromator"},
                        bands={1: (230e-9, 500e-9), 3: (600e-9, 1253e-9), 5: "pass-through"})
-
-# Export TEST_NOHW = 1 to prevent using the real hardware
-TEST_NOHW = (os.environ.get("TEST_NOHW", "0") != "0")  # Default to Hw testing
 
 
 # Inheritance order is important for setUp, tearDown
@@ -168,6 +193,10 @@ class TestHamamatsurxNoReadoutCamera(unittest.TestCase):
         with self.assertRaises(util.TimeoutError):
             self.streakcam.sendCommand("Appinfoo", "type")
 
+    def test_SendCommandSimple(self):
+        msg = self.streakcam.sendCommand("Appinfo", "type")
+        self.assertEqual(msg, ["HPDTA"])
+
     ### Delay generator #####################################################
     def test_TriggerDelay(self):
         """Test Acquisition Mode VA for delay generator."""
@@ -275,7 +304,7 @@ class TestHamamatsurxCam(unittest.TestCase):
         if TEST_NOHW:
             raise unittest.SkipTest('No streak camera HW present. Skipping tests.')
 
-        cls.streakcam = CLASS_STREAKCAM(**KWARGS_STREAKCAM)
+        cls.streakcam = CLASS_STREAKCAM(**KWARGS_STREAKCAM_NO_DELAYBOX)
 
         for child in cls.streakcam.children.value:
             if child.name == CONFIG_READOUTCAM["name"]:
@@ -285,32 +314,32 @@ class TestHamamatsurxCam(unittest.TestCase):
             if child.name == CONFIG_DELAYBOX["name"]:
                 cls.delaybox = child
 
-        cls.delaybox.updateMetadata({model.MD_TIME_RANGE_TO_DELAY:
-                                    {
-                                        1.e-9: 7.99e-9,
-                                        2.e-9: 9.63e-9,
-                                        5.e-9: 33.2e-9,
-                                        10.e-9: 45.9e-9,
-                                        20.e-9: 66.4e-9,
-                                        50.e-9: 102e-9,
-                                        100.e-9: 169e-9,
-                                        200.e-9: 302e-9,
-                                        500.e-9: 731e-9,
-                                        1.e-6: 1.39e-6,
-                                        2.e-6: 2.69e-6,
-                                        5.e-6: 7.02e-6,
-                                        10.e-6: 13.8e-6,
-                                        20.e-6: 26.7e-6,
-                                        50.e-6: 81.6e-6,
-                                        100.e-6: 161e-6,
-                                        200.e-6: 320e-6,
-                                        500.e-6: 798e-6,
-                                        1.e-3: 1.62e-3,
-                                        2.e-3: 3.18e-3,
-                                        5.e-3: 7.88e-3,
-                                        10.e-3: 15.4e-3,
-                                    }
-                                    })
+        # cls.delaybox.updateMetadata({model.MD_TIME_RANGE_TO_DELAY:
+        #                             {
+        #                                 1.e-9: 7.99e-9,
+        #                                 2.e-9: 9.63e-9,
+        #                                 5.e-9: 33.2e-9,
+        #                                 10.e-9: 45.9e-9,
+        #                                 20.e-9: 66.4e-9,
+        #                                 50.e-9: 102e-9,
+        #                                 100.e-9: 169e-9,
+        #                                 200.e-9: 302e-9,
+        #                                 500.e-9: 731e-9,
+        #                                 1.e-6: 1.39e-6,
+        #                                 2.e-6: 2.69e-6,
+        #                                 5.e-6: 7.02e-6,
+        #                                 10.e-6: 13.8e-6,
+        #                                 20.e-6: 26.7e-6,
+        #                                 50.e-6: 81.6e-6,
+        #                                 100.e-6: 161e-6,
+        #                                 200.e-6: 320e-6,
+        #                                 500.e-6: 798e-6,
+        #                                 1.e-3: 1.62e-3,
+        #                                 2.e-3: 3.18e-3,
+        #                                 5.e-3: 7.88e-3,
+        #                                 10.e-3: 15.4e-3,
+        #                             }
+        #                             })
 
     @classmethod
     def tearDownClass(cls):

@@ -45,6 +45,7 @@ GEN_START = "S"  # Start acquisition
 GEN_STOP = "E"  # Don't acquire image anymore
 GEN_TERM = "T"  # Stop the generator
 GEN_RESYNC = "R"  # Synchronisation stopped
+GEN_SETTINGS = "U"  # Update hardware settings
 # There are also floats, which are used to indicate a trigger (containing the time the trigger was sent)
 
 # Type of software trigger to use
@@ -1839,7 +1840,7 @@ class AndorCam2(model.DigitalCamera):
         value = self._transposeSizeFromUser(value)
         new_res = self.resolutionFitter(value)
         self._storeSize(new_res)
-        self._update_settings_if_not_acquiring()
+        self._should_apply_settings()
         return self._transposeSizeToUser(new_res)
 
     def resolutionFitter(self, size_req):
@@ -1896,7 +1897,7 @@ class AndorCam2(model.DigitalCamera):
         self.atcore.GetMaximumExposure(byref(maxexp))
         # we cache it until just before the next acquisition
         self._exposure_time = min(value, maxexp.value)
-        self._update_settings_if_not_acquiring()
+        self._should_apply_settings()
         return self._exposure_time
 
     def _setReadoutRate(self, value):
@@ -1904,18 +1905,18 @@ class AndorCam2(model.DigitalCamera):
         # Everything (within the choices) is fine, just need to update gain.
         self._readout_rate = value
         self.gain.value = self.gain.value  # Force checking it
-        self._update_settings_if_not_acquiring()
+        self._should_apply_settings()
         return value
 
     def _setShutterPeriod(self, period):
         self._shutter_period = period
-        self._update_settings_if_not_acquiring()
+        self._should_apply_settings()
         return period
 
     def setGain(self, value):
         # Just save, and the setting will be actually updated by _update_settings()
         self._gain = value
-        self._update_settings_if_not_acquiring()
+        self._should_apply_settings()
         return self._gain
 
     def _getMaxBPP(self):
@@ -1934,24 +1935,14 @@ class AndorCam2(model.DigitalCamera):
         assert(mbpp > 0)
         return mbpp
 
-    def _update_settings_if_not_acquiring(self):
+    def _should_apply_settings(self):
         """
-        Try to directly configure the camera, if it's not acquiring.
-        This way the .frameDuration value is updated
+        Report that the settings have changed and so should be used to reconfigure the camera, which
+        will happen "soon". If the acquisition is not running, that almost immediate, but if it's running,
+        it will be done after end of the current frame.
+        This way the .frameDuration value is updated.
         """
-        # See if the camera is acquiring: has hw_lock and status is acquiring
-        # If we fail to acquire the lock, it means the acquisition is ongoing
-        # so no need/not possible to update the settings. They will be updated next frame.
-        if self.hw_lock.acquire(timeout=0.1):
-            try:
-                if self.GetStatus() != AndorV2DLL.DRV_ACQUIRING:
-                    self._update_settings()
-            finally:
-                self.hw_lock.release()
-        else:
-            logging.debug("Cannot update HW settings immediately after VA update as acquisition is ongoing")
-            # TODO: might still need to update the settings at the end of the acquisition, in case
-            # the VAs were just changed before ending the acquisition?
+        self._genmsg.put(GEN_SETTINGS)
 
     def _need_update_settings(self):
         """
@@ -2014,11 +2005,12 @@ class AndorCam2(model.DigitalCamera):
 
         return trigger_mode
 
-    def _update_settings(self):
+    def _update_settings(self, acquiring: bool):
         """
         Commits the settings to the camera. Only the settings which have been
         modified are updated.
         Note: the acquisition must _not_ going on.
+        :param acquiring: whether the acquisition is currently running (in which case the shutter is controlled)
         return:
             res (int, int): resolution of the image to be acquired in X and Y (px, px)
             duration (float): expected time per frame (s)
@@ -2124,14 +2116,17 @@ class AndorCam2(model.DigitalCamera):
         b, rect = new_image_settings[0:2], new_image_settings[2:]
         im_res = (rect[1] - rect[0] + 1) // b[0], (rect[3] - rect[2] + 1) // b[1]
 
+        # FIXME: don't set the shutter if acquisition is not active
+        # FIXME: close the shutter at the end of the acquisition
         # It's a little tricky because we decide whether to use or not the shutter
         # based on exp and readout time, but setting the shutter clamps the
         # exposure time.
-        if self._shutter_period is not None:
+        if self._shutter_period is not None and acquiring:
             # Activate shutter closure whenever needed:
-            # Shutter closes between exposures iif:
+            # Shutter closes between exposures if all of these are true:
             # * period between exposures is long enough (>0.1s): to ensure we don't burn the mechanism
             # * readout time > exposure time/100 (when risk of smearing is possible)
+            # * binning is not full vertical (as it wouldn't be useful anyway)
             readout = im_res[0] * im_res[1] / self._readout_rate  # s
             tot_time = self._exposure_time + readout
             shutter_active = False
@@ -2151,6 +2146,7 @@ class AndorCam2(model.DigitalCamera):
                 self.SetShutter(1, 0, self._shutter_cltime, self._shutter_optime)  # mode 0 = auto
             else:
                 self.SetShutter(1, 1, 0, 0)
+                # TODO: investigate this claim
                 # Note that the shutter times limits the minimum exposure time
                 # => always try again setting exp time, in case shutter was active before
 
@@ -2234,7 +2230,7 @@ class AndorCam2(model.DigitalCamera):
             # To make sure the generator is not wait forever for a trigger
             logging.debug("Sending resynchronisation event")
             self._genmsg.put(GEN_RESYNC)
-            self._update_settings_if_not_acquiring()
+            self._should_apply_settings()
 
         logging.debug("Acquisition now set to synchronized mode %s", sync)
 
@@ -2264,7 +2260,7 @@ class AndorCam2(model.DigitalCamera):
         raises queue.Empty: if no message on the queue
         """
         msg = self._genmsg.get(**kwargs)
-        if (msg in (GEN_START, GEN_STOP, GEN_TERM, GEN_RESYNC) or
+        if (msg in (GEN_START, GEN_STOP, GEN_TERM, GEN_RESYNC, GEN_SETTINGS) or
               isinstance(msg, float)):
             logging.debug("Acq received message %s", msg)
         else:
@@ -2282,6 +2278,10 @@ class AndorCam2(model.DigitalCamera):
             msg = self._get_acq_msg(block=True)
             if msg == GEN_TERM:
                 raise TerminationRequested()
+            elif msg == GEN_SETTINGS:
+                if self._need_update_settings():
+                    self._update_settings(acquiring=False)
+                continue  # wait for more message
             elif msg == GEN_START:
                 return
 
@@ -2314,6 +2314,9 @@ class AndorCam2(model.DigitalCamera):
             elif msg == GEN_RESYNC:
                 # Indicate the acquisition mode (might) have changed
                 return GEN_RESYNC
+            elif msg == GEN_SETTINGS:
+                logging.debug("Skipping settings update as acquisition is running")
+                continue  # ignore it (cannot be updated during acquisition)
             else:  # Anything else shouldn't really happen
                 logging.warning("Skipped message %s as acquisition is waiting for data", msg)
 
@@ -2343,6 +2346,9 @@ class AndorCam2(model.DigitalCamera):
                 elif isinstance(msg, float):  # float = trigger
                     trigger = msg
                     break
+                elif msg == GEN_SETTINGS:
+                    logging.debug("Skipping settings update as acquisition is ready for trigger")
+                    continue  # ignore it (cannot be updated during acquisition)
                 else: # Anything else shouldn't really happen
                     logging.warning("Skipped message %s as acquisition is waiting for trigger", msg)
 
@@ -2445,7 +2451,7 @@ class AndorCam2(model.DigitalCamera):
                         if ex.errno != 20073:  # DRV_IDLE == already aborted == not a big deal
                             raise
 
-                    im_res, duration, trigger_mode = self._update_settings()
+                    im_res, duration, trigger_mode = self._update_settings(acquiring=True)
                     if not has_hw_lock:
                         self.hw_lock.acquire()
                         has_hw_lock = True

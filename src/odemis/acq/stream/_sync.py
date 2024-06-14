@@ -1273,6 +1273,8 @@ class SEMCCDMDStream(MultipleDetectorStream):
         # Note: the shutter can be controlled both from the spectrograph and the CCD (as it's on the spectrograph, but
         # controlled by the CCD). So it's fine to just control from the CCD.
 
+        # TODO: make the frameDuration getter blocking until all the settings have been updated?
+        time.sleep(0.1)  # give a bit of time for the frameDuration to be updated
         frame_duration = self._ccd.frameDuration.value
         logging.debug("Frame duration of the CCD is %s (for exposure time %s)", frame_duration, self._ccd.exposureTime.value)
 

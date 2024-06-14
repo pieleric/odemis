@@ -1197,7 +1197,7 @@ class Shamrock(model.Actuator):
     def GetFocusMirror(self):
         """
         Get the current position of the focus
-        return (0<=int<=maxsteps): absolute position (in steps)
+        return (0<int<=maxsteps): absolute position (in steps)
         """
         focus = c_int()
         with self._hw_access:
@@ -1208,6 +1208,8 @@ class Shamrock(model.Actuator):
     def GetFocusMirrorMaxSteps(self):
         """
         Get the maximum position of the focus
+        WARNING: the KY298 returns 550, but if going precisely to 550, it will raise a "communication
+        error" (while going out of the official range raises a "parameter invalid" error).
         return (0 <= int): absolute max position (in steps)
         """
         focus = c_int()
@@ -1615,6 +1617,7 @@ class Shamrock(model.Actuator):
                 userv = [k for k, v in FLIPPER_TO_PORT.items() if v == val][0]
                 pos[name] = userv
 
+        logging.debug("%s position updated to %s", self.name, pos)
         self.position._set_value(pos, must_notify=must_notify, force_write=True)
 
     def _storeFocus(self):
@@ -1632,6 +1635,7 @@ class Shamrock(model.Actuator):
             op = 0
         f = self.GetFocusMirror()
         self._go2focus[(g, op)] = f
+        logging.debug("Focus position for %s/%s stored to %d stp", g, op, f)
 
     def _restoreFocus(self):
         """

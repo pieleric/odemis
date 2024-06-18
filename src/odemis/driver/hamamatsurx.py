@@ -88,17 +88,28 @@ class ReadoutCamera(model.DigitalCamera):
     Represents Hamamatsu readout camera.
     """
 
-    def __init__(self, name, role, parent, spectrograph=None, **kwargs):
+    def __init__(self, name, role, parent,
+                 spectrograph: Optional[model.HwComponent] = None,
+                 delaybox: Optional[model.HwComponent] = None,
+                 **kwargs):
         """ Initializes the Hamamatsu OrcaFlash readout camera.
         :param name: (str) as in Odemis
         :param role: (str) as in Odemis
-        :param parent: class streakcamera
+        :param parent: class StreakCamera
+        :param spectrograph: should provide .position and getPixelToWavelength() to
+        obtain the wavelength list.
+        :param delaybox: should provide .triggerRate VA, containing the frequency (Hz) of the pulse
+        signal going to the streak unit.
         """
         self.parent = parent
 
         self._spectrograph = spectrograph
         if not spectrograph:
             logging.warning("No spectrograph specified. No wavelength metadata will be attached.")
+
+        self._delaybox = delaybox
+        if not delaybox:
+            logging.warning("No delay box specified. No trigger rate metadata will be attached.")
 
         try:
             cam_info = parent.CamParamGet("Setup", "CameraInfo")
@@ -196,13 +207,7 @@ class ReadoutCamera(model.DigitalCamera):
         self.queue_events = collections.deque()
         self._acq_sync_lock = threading.Lock()
 
-        # start thread, which keeps reading the dataport when an image/scaling table has arrived
-        # after commandport thread to be able to set the RingBuffer
-        # AcqLiveMonitor writes images to Ringbuffer, which we can read from
-        # only works if we use "Live" or "SingleLive" mode
-        self.parent.AcqLiveMonitor("RingBuffer", "10")  # Note: need to be handled in case we use other acq modes
-        self.t_image = threading.Thread(target=self._getDataFromBuffer)
-        self.t_image.start()
+        self.t_image = None  # thread for reading images from the RingBuffer
 
         self.data = StreakCameraDataFlow(self._start, self._stop, self._sync)
 
@@ -355,6 +360,17 @@ class ReadoutCamera(model.DigitalCamera):
         """
         Start an acquisition.
         """
+        # restart thread in case it was terminated
+        if not self.t_image or not self.t_image.is_alive():
+            # start thread, which keeps reading the dataport when an image/scaling table has arrived
+            # after commandport thread to be able to set the RingBuffer
+            # AcqLiveMonitor writes images to Ringbuffer, which we can read from
+            # only works if we use "Live" or "SingleLive" mode
+
+            self.parent.AcqLiveMonitor("RingBuffer", nbBuffers=3)
+            self.t_image = threading.Thread(target=self._getDataFromBuffer)
+            self.t_image.start()
+
         # Note: no function to get current acqMode.
         # Note: Acquisition mode, needs to be before exposureTime!
         # Acquisition mode should be either "Live" (non-sync acq) or "SingleLive" (sync acq) for now.
@@ -417,11 +433,10 @@ class ReadoutCamera(model.DigitalCamera):
         Create dict containing all metadata from the children readout camera, streak unit, delay generator
         and the metadata from the parent streak camera.
         """
-
-        # TODO: delay generator should be optional
-        md_devices = [self.parent._streakunit._metadata, self.parent._delaybox._metadata]
-
-        for md_dev in md_devices:
+        for dev in (self.parent._streakunit, self._delaybox):
+            if dev is None:
+                continue
+            md_dev = dev.getMetadata()
             for key in md_dev.keys():
                 if key not in md:
                     md[key] = md_dev[key]
@@ -568,9 +583,13 @@ class ReadoutCamera(model.DigitalCamera):
 
                 # update MD for the current image
                 try:
-                    # FIXME: should not be hard-coded to this component.
-                    # => read RO VA triggerRate from delaybox (which is a dependency)
-                    self._metadata[model.MD_TRIGGER_RATE] = self.parent._delaybox.triggerRate.value
+                    # This is a bit of a hack: ideally, we would subscribe to the triggerRate VA.
+                    # However, with the hamamatsurx, that would require very frequent polling.
+                    # So, instead, we just query the device when we receive an image.
+                    # TODO: how much time does this cost? If it's too much, we should consider just
+                    # polling, or reading while we're waiting for the image.
+                    if self._delaybox:
+                        self._metadata[model.MD_TRIGGER_RATE] = self._delaybox.triggerRate.value
                 except Exception:
                     logging.exception("Failed to update trigger rate")
 
@@ -689,9 +708,13 @@ class StreakUnit(model.HwComponent):
 
     def terminate(self):
         self._va_poll.cancel()
-        # Put it back to the safest mode possible
+
+        # Put device into the safest mode possible
         self.parent.DevParamSet(self.location, "MCP Gain", 0)
         self.parent.DevParamSet(self.location, "Mode", "Focus")  # streakMode = False
+        if hasattr(self, "shutter"):
+            self.parent.DevParamSet(self.location, "Shutter", "Closed")
+
         super().terminate()
 
     def _onMCPGain(self, value: int) -> None:
@@ -1016,12 +1039,12 @@ class DelayGenerator(model.HwComponent):
         else:
             logging.warning("No triggerDelay VA available in delay generator.")
 
-        # FIXME: where is phase lock controlled? Typically, only in synchroscan. Streakunit or delaybox? "Lock Mode"
-        # => This is on the delay box
-        # Expected only the synchroscan: to control the phase lock (ie, the sweep is synchronized on the trigger signal)
-        if "PLL Mode" in avail_params:
-            pllMode = self.GetPLLMode()
-            self.phaseLocked = model.BooleanVA(pllMode, setter=self._setPLLMode)
+        # # FIXME: where is phase lock controlled? Typically, only in synchroscan. Streakunit or delaybox? "Lock Mode"
+        # # => This is on the delay box
+        # # Expected only the synchroscan: to control the phase lock (ie, the sweep is synchronized on the trigger signal)
+        # if "PLL Mode" in avail_params:
+        #     pllMode = self.GetPLLMode()
+        #     self.phaseLocked = model.BooleanVA(pllMode, setter=self._setPLLMode)
 
         # Refresh regularly the values, from the hardware, starting from now
         self._updateSettings()
@@ -1179,12 +1202,12 @@ class DelayGenerator(model.HwComponent):
                 trigger_rate = self.GetTriggerRate()
                 if trigger_rate != self.triggerRate._value:
                     self.triggerRate._set_value(trigger_rate, force_write=True)
-
-            if hasattr(self, "phaseLocked"):
-                pllMode = self.GetPLLMode()
-                if pllMode != self.phaseLocked.value:
-                    self.phaseLocked._value = pllMode
-                    self.phaseLocked.notify(pllMode)
+            #
+            # if hasattr(self, "phaseLocked"):
+            #     pllMode = self.GetPLLMode()
+            #     if pllMode != self.phaseLocked.value:
+            #         self.phaseLocked._value = pllMode
+            #         self.phaseLocked.notify(pllMode)
 
             for rxname, vaname in zip(DELAY_NAME_REMOTE_EX, DELAY_NAME_VAS):
                 if hasattr(self, vaname):
@@ -1215,7 +1238,9 @@ class StreakCamera(model.HwComponent):
         :param settings_ini: path to the INI file for HPDTA, which defines which hardware is initialized
         If None, the default INI file is used.
         :param children: should contain a "streakunit", a "readoutcam" (optional), and a "delaybox" (optional)
-        :param dependencies: should have a "spectrograph" for the readout camera, to obtain the wavelength metadata
+        :param dependencies: s
+        * "spectrograph" (optional): for the readout camera, to obtain the wavelength metadata
+        * "delaybox" (optional, only if no delaybox child is provided): to obtain the trigger rate
         """
         super().__init__(name, role, dependencies=dependencies, daemon=daemon, **kwargs)
 
@@ -1244,22 +1269,23 @@ class StreakCamera(model.HwComponent):
         # start thread, which keeps reading the commandport response continuously
         self._start_receiverThread()
 
-        # Note: start HPDTA after initializing queue and command and receiver treads
+        # Note: start HPDTA after initializing queue and command and receiver threads
         # but before image thread and initializing children.
-        #
-        self.AppStart(settings_ini)  # start HPDTA software  # Note: comment out for testing in order to not start a new App
+        # Note: if already running, it will return ["parameters ignored"] and continue
+        self.AppStart(settings_ini)  # Note: comment out for testing in order to not start a new App
+
+        # If the USB dongle is missing, the software will still run, but not actually control the
+        # hardware, and mostly everything will fail to run. So it's handy to check.
+        # TODO: raise a HwError() in such case?
+        license_status = self.AppLicenceGet()
+        if "1" not in license_status:
+            logging.warning("HPDTA software didn't find the license. Will not be able to control the streak camera.")
+        vinfo = self.AppInfo("Version")
+        self._swVersion = vinfo[0]
+
         try:
             children = children or {}
             dependencies = dependencies or {}
-
-            if "readoutcam" in children.keys():
-                ckwargs = children["readoutcam"]
-                self._readoutcam = ReadoutCamera(parent=self, spectrograph=dependencies.get("spectrograph"),
-                                                 daemon=daemon, **ckwargs)
-                self.children.value.add(self._readoutcam)  # add readoutcam to children-VA
-            else:
-                logging.info("No readout camera provided.")
-
             try:
                 ckwargs = children["streakunit"]
             except Exception:
@@ -1267,12 +1293,25 @@ class StreakCamera(model.HwComponent):
             self._streakunit = StreakUnit(parent=self, daemon=daemon, **ckwargs)
             self.children.value.add(self._streakunit)  # add streakunit to children-VA
 
+            self._delaybox = dependencies.get("delaybox")
             if "delaybox" in children.keys():
+                if self._delaybox:
+                    raise ValueError("Both a delaybox child and a delaybox dependency are provided.")
                 ckwargs = children["delaybox"]
                 self._delaybox = DelayGenerator(parent=self, daemon=daemon, streak_unit=self._streakunit, **ckwargs)
                 self.children.value.add(self._delaybox)  # add delaybox to children-VA
             else:
                 logging.info("No delaybox provided.")
+
+            if "readoutcam" in children.keys():
+                ckwargs = children["readoutcam"]
+                self._readoutcam = ReadoutCamera(parent=self, spectrograph=dependencies.get("spectrograph"),
+                                                 delaybox=self._delaybox,
+                                                 daemon=daemon, **ckwargs)
+                self.children.value.add(self._readoutcam)  # add readoutcam to children-VA
+            else:
+                logging.info("No readout camera provided.")
+
         except Exception:
             try:
                 # Close back the app, so that we have some chance it can be started
@@ -1283,6 +1322,11 @@ class StreakCamera(model.HwComponent):
             self.should_listen = False  # terminates receiver thread
             self._closeConnection()
             raise
+
+    def terminate(self):
+        for c in self.children.value:
+            c.terminate()
+        super().terminate()
 
     def _openConnection(self):
         """
@@ -1519,13 +1563,6 @@ class StreakCamera(model.HwComponent):
         :param AcqMode: (str) see AcqStart
         """
         # Note: sync acquisition calls directly AcqStart
-
-        # restart thread in case it was terminated
-        if not self._readoutcam.t_image.is_alive():
-            self.AcqLiveMonitor("RingBuffer", nbBuffers=3)
-            self._readoutcam.t_image = threading.Thread(target=self._readoutcam._getDataFromBuffer)
-            self._readoutcam.t_image.start()
-
         try:
             self.AcqStart(AcqMode)
         except RemoteExError as ex:
@@ -1635,11 +1672,11 @@ class StreakCamera(model.HwComponent):
         :returns: Label, Current value, Param type (PARAM_TYPE_DISPLAY)"""
         return self.sendCommand("MainParamInfoEx", parameter)
 
-    def MainParamList(self):
+    def MainParamsList(self):
         """Returns a list of all parameters related to main window.
         This command can be used to build up a complete parameter list related to main window at runtime.
         :returns: NumberOfParameters,Parameter1,..., ParameterN"""
-        return self.sendCommand("MainParamList")
+        return self.sendCommand("MainParamsList")
 
     def MainSyncGet(self):
         """Returns the setting of the sync parameter which is available on the HPD-TA main window.
@@ -1826,7 +1863,7 @@ class StreakCamera(model.HwComponent):
         :return: msg"""
         # TODO check monitorType and then add the correct opt param to the fct call when defined by the caller
         # Note: args can be only one argument
-        if nbBuffers and monitorType == "RingBuffer":
+        if nbBuffers is not None and monitorType == "RingBuffer":
             args = (str(nbBuffers),)
         return self.sendCommand("acqLiveMonitor", monitorType, *args)
 

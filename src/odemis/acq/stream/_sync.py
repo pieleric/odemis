@@ -24,33 +24,31 @@ You should have received a copy of the GNU General Public License along with Ode
 # all the detectors can run simultaneously (each receiving a different wavelength
 # band).
 
+import logging
+import math
+import queue
+import threading
+import time
 from abc import ABCMeta, abstractmethod
 from concurrent.futures._base import RUNNING, FINISHED, CANCELLED, TimeoutError, \
     CancelledError
 from functools import partial
-import logging
-import math
-from typing import Tuple
+from typing import Tuple, List
 
 import numpy
 
-from odemis import model, util
+import odemis.util.driver as udriver
+from odemis import model
 from odemis.acq import drift
 from odemis.acq import leech
 from odemis.acq.leech import AnchorDriftCorrector
 from odemis.acq.stream._live import LiveStream
-from odemis.util.driver import guessActuatorMoveDuration
 from odemis.model import MD_POS, MD_DESCRIPTION, MD_PIXEL_SIZE, MD_ACQ_DATE, MD_AD_LIST, \
     MD_DWELL_TIME, MD_EXP_TIME, MD_DIMS, MD_THETA_LIST, MD_WL_LIST, MD_ROTATION, \
     MD_ROTATION_COR
 from odemis.model import hasVA
 from odemis.util import units, executeAsyncTask, almost_equal, img, angleres
-import queue
-import threading
-import time
-
-import odemis.util.driver as udriver
-
+from odemis.util.driver import guessActuatorMoveDuration
 from . import MonochromatorSettingsStream
 from ._base import Stream, POL_POSITIONS, POL_MOVE_TIME
 
@@ -603,8 +601,14 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
             self._acq_complete[n].set()  # indicate the data has been received
 
     def _onHwSyncData(self, n, df, data):
+        """
+        Callback function. Called for each stream n. Similar to _onData, but used during
+        hardware synchronized acquisitions.
+        :param n (0<=int): the detector/stream index
+        :param df (DataFlow): detector's dataflow
+        :param data (DataArray): image (2D array) received from detector
+        """
         logging.debug("Stream %d data received", n)
-        # TODO: update the tint metadata => move to preprocessData?
         self._acq_data_queue[n].put(data)
 
     def _preprocessData(self, n, data, i):
@@ -645,14 +649,19 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
         da.metadata[MD_DESCRIPTION] = self._streams[n].name.value
         self._raw.append(da)
 
-    def _get_center_pxs(self, rep, tile_shape, tile_size, pos_lt):
+    def _get_center_pxs(self, rep: Tuple[int, int],
+                        tile_shape: Tuple[int, int],
+                        tile_size: Tuple[float, float],
+                        pos_lt: Tuple[float, float]) -> Tuple[
+                    Tuple[float, float],
+                    Tuple[float, float]]:
         """
         Computes the center and pixel size of the entire data based on the
         top-left data acquired.
-        rep (int, int): number of pixels (tiles) in X, Y
-        tile_shape (int, int): number of sub-pixels in a pixel, X, Y
-        tile_size (float, float): size of a tile in m
-        pos_lt (float, float): center position of the top-left tile
+        rep (int, int): number of pixels (X, Y) in the complete acquisition, not taking into account sub-pixels
+        tile_shape (int, int): number of sub-pixels in a pixel (X, Y)
+        tile_size (float, float): size of a tile in m (X, Y)
+        pos_lt: center position of the top-left tile (X, Y)
         return:
             center (tuple of floats): position in m of the whole data
             pxs (tuple of floats): pixel size in m of the sub-pixels
@@ -1067,7 +1076,7 @@ class SEMCCDMDStream(MultipleDetectorStream):
         if self._integrationTime and self._integrationCounts.value > 1:
             return False
 
-        # not supported if drift correction, or other "leeches" are used (for now)
+        # not supported if leeches (eg, drift correction) used... for now (to keep the code simpler)
         if self.leeches:
             return False
 
@@ -1238,7 +1247,7 @@ class SEMCCDMDStream(MultipleDetectorStream):
         else:
             return self._runAcquisitionEbeam(future)
 
-    def _adjustHardwareSettingsHwSync(self):
+    def _adjustHardwareSettingsHwSync(self) -> Tuple[float, int]:
         """
         Read the SEM and CCD stream settings and adapt the CCD and SEM scanner accordingly.
         :returns: exp + readout (float): Estimated time for a whole (but not integrated) CCD image.
@@ -1251,11 +1260,13 @@ class SEMCCDMDStream(MultipleDetectorStream):
 
         integration_count = 1
 
-        # The CCD has already been configured based on the SettingsStream settings, so no need to
-
         fuzzing = (hasattr(self, "fuzzing") and self.fuzzing.value)
         if fuzzing:
             raise NotImplementedError("Fuzzing not supported with hardware sync")
+
+        # Note: no need to update the CCD settings selected by the user here, as it has already been
+        # done via the SettingsStream.
+        # FIXME: that's not true for the emitter power, and exposureTime *if* integrationTime is used.
 
         # Set the CCD to hardware synchronised acquisition
         # Note, when it's not directly the actual CCD, but a CompositedSpectrometer, the settings
@@ -1278,9 +1289,8 @@ class SEMCCDMDStream(MultipleDetectorStream):
         frame_duration = self._ccd.frameDuration.value
         logging.debug("Frame duration of the CCD is %s (for exposure time %s)", frame_duration, self._ccd.exposureTime.value)
 
-        # Dwell time should be the same as the frame duration of the CCD, or a tiny bit longer, to
-        # be certain the CCD is ready to receive the next hardware trigger (otherwise, it'll just be
-        # ignored)
+        # Dwell time should be the same as the frame duration of the CCD, or a tiny bit longer, to be certain
+        # the CCD is ready to receive the next hardware trigger (otherwise, it'll just be ignored)
         frame_duration_safe = frame_duration + CCD_FRAME_OVERHEAD
         c_dwell_time = self._emitter.dwellTime.clip(frame_duration_safe * integration_count)
         if c_dwell_time != frame_duration_safe * integration_count:
@@ -1318,7 +1328,7 @@ class SEMCCDMDStream(MultipleDetectorStream):
             # Make sure to keep all frames
             self._ccd.dropOldFrames.value = self._hw_settings_orig["dropOldFrames"]
 
-    def _runAcquisitionHwSyncEbeam(self, future):
+    def _runAcquisitionHwSyncEbeam(self, future) -> List[model.DataArray]:
         """
         Acquires images from the multiple detectors by moving the ebeam, and triggering a CCD frame
         acquisition via hardware trigger connecting the e-beam scanner pixel position to the CCD.
@@ -1332,7 +1342,6 @@ class SEMCCDMDStream(MultipleDetectorStream):
           Exceptions if error
         """
 
-        ccd_dates = []  # list of dates of the CCD images DEBUG
         try:
             self._acq_done.clear()
             # Configure the CCD to the defined exposure time, and hardware sync + get frame duration
@@ -1523,7 +1532,8 @@ class SEMCCDMDStream(MultipleDetectorStream):
         else:
             return self.raw
         finally:
-            # In case of frame drop issue, uncomment this to analyse the timing.
+            # In case of frame drop issue, create a ccd_dates list at the top of the function, and
+            # uncomment the lines related to ccd_dates to analyse the timing:
             # dates_diff = numpy.diff(ccd_dates)
             # logging.debug("Median CCD images time differences: %s (over %s dates)", numpy.median(dates_diff), len(ccd_dates))
             # logging.debug("Max CCD images time differences: %s", sorted(dates_diff)[-10:])

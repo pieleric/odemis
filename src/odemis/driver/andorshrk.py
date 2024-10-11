@@ -2222,6 +2222,7 @@ class ShamrockBus(model.HwComponent):
             dev = Shamrock(device="fake", daemon=daemon, **ckwargs)
             self.children.value.add(dev)
 
+        self._dll = None
         if shamrocks:
             self._dll = ShamrockDLL()
             self.Initialize()
@@ -2262,7 +2263,11 @@ class ShamrockBus(model.HwComponent):
     def terminate(self):
         for c in self.children.value:
             c.terminate()
-        self.Close()
+
+        if self._dll:
+            self.Close()
+            self._dll = None
+
         super().terminate()
 
     def Initialize(self):

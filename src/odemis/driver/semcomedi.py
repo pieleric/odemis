@@ -2769,6 +2769,10 @@ class Scanner(model.Emitter):
         return self._settle_time
 
     @roattribute
+    def scanActiveDelay(self):
+        return self._scan_active_delay
+
+    @roattribute
     def HFWNoMag(self):
         return self._hfw_nomag
 

@@ -2324,6 +2324,7 @@ class Scanner(model.Emitter):
         # Manage the "slow" TTL signals
         self.active_ttl_mng = ActiveTTLManager(parent, self, scanning_ttl or {}, scan_active_delay,
                                                self._on_active_state_change)
+        self._scan_active_delay = scan_active_delay
 
         # Validate fast TTLs
         fast_do_channels = set()  # set of ints, to check all channels are unique
@@ -2548,6 +2549,10 @@ class Scanner(model.Emitter):
     @roattribute
     def settleTime(self):
         return self._settle_time
+
+    @roattribute
+    def scanActiveDelay(self):
+        return self._scan_active_delay
 
     @roattribute
     def HFWNoMag(self):

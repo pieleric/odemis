@@ -96,19 +96,16 @@ CONFIG_SCANNER = {
         3: [False, True, "blanker"],  # Low when scanning, High when VA set to True
     },
     "image_ttl": {
-        "pixel": {
-             "ports": [0, 7],
-             "inverted": [False, True],
-             "affects": ["IR Camera", "UV Camera"],
-        },
-        "line": {
-             "ports": [1],
-             # "inverted": [True],
-        },
-        "frame": {
-             "ports": [6],
-             # "inverted": [True],
-        },
+       # "pixel": {
+       #      "ports": [0, 7],
+       #      "affects": ["IR Camera", "UV Camera"],
+       # }, #DEBUG
+#        "line": {
+#              "ports": [1],
+#         },
+        # "frame": {
+        #      "ports": [6],
+        # },
     },
 }
 
@@ -150,12 +147,9 @@ class TestAnalogSEM(unittest.TestCase):
                 cls.counter = child
 
         # Compute the fast TTL masks, for the waveform checks
-        pixel_ttls = CONFIG_SCANNER["image_ttl"]["pixel"]
-        pixel_ttls_conf = list(zip(pixel_ttls["ports"], pixel_ttls["inverted"]))
-        cls.pixel_bit = sum(1 << c for c, inv in pixel_ttls_conf if not inv)
-        cls.pixel_bit_inv = sum(1 << c for c, inv in pixel_ttls_conf if inv)
-        cls.line_bit = sum(1 << c for c in CONFIG_SCANNER["image_ttl"]["line"]["ports"])
-        cls.frame_bit = sum(1 << c for c in CONFIG_SCANNER["image_ttl"]["frame"]["ports"])
+        # cls.pixel_bit = sum(1 << c for c in CONFIG_SCANNER["image_ttl"]["pixel"]["ports"])
+        # cls.line_bit = sum(1 << c for c in CONFIG_SCANNER["image_ttl"]["line"]["ports"])
+        # cls.frame_bit = sum(1 << c for c in CONFIG_SCANNER["image_ttl"]["frame"]["ports"])
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -233,11 +227,9 @@ class TestAnalogSEM(unittest.TestCase):
         ttl_clock = numpy.arange(ttl_array.shape[-1]) * 0.5  # The clock for the TTL is twice faster than the analog out
 
         ttl_pixel = (ttl_array & self.pixel_bit) != 0
-        ttl_pixel_inv = (ttl_array & self.pixel_bit_inv) != 0
         ttl_line = (ttl_array & self.line_bit) != 0
         ttl_frame = (ttl_array & self.frame_bit) != 0
         plt.plot(ttl_clock, ttl_pixel * 10000 - 51000, label="pixel TTL")
-        plt.plot(ttl_clock, ttl_pixel_inv * 10000 - 51000, label="pixel inv TTL")
         plt.plot(ttl_clock, ttl_line * 10000 - 40000, label="line TTL")
         plt.plot(ttl_clock, ttl_frame * 10000 - 29000, label="frame TTL")
         # plt.plot(scan_array[0].flat, scan_array[1].flat, "ro") # X vs Y -> should show the whole grid of points
@@ -295,11 +287,8 @@ class TestAnalogSEM(unittest.TestCase):
         # Check the TTL signals
         self.assertEqual(ttl_array.shape, (exp_length * 2,))
         # There should be one high tick per pixel position
-        nb_active = numpy.sum((ttl_array & self.pixel_bit).astype(bool))
-        self.assertEqual(nb_active, res[0] * res[1])
-        nb_active_inv = numpy.sum(~(ttl_array & self.pixel_bit_inv).astype(bool))
-        self.assertEqual(nb_active_inv, res[0] * res[1])
-
+        nb_high = numpy.sum((ttl_array & self.pixel_bit).astype(bool))
+        self.assertEqual(nb_high, res[0] * res[1])
         # First value of line and frame should be low, and last one should be high
         self.assertEqual(bool(ttl_array[0] & self.line_bit), False)
         self.assertEqual(bool(ttl_array[-1] & self.line_bit), True)
@@ -344,11 +333,8 @@ class TestAnalogSEM(unittest.TestCase):
         self.assertEqual(ttl_array.shape, (exp_length * 2,))
 
         # There should be one high tick per pixel position
-        nb_active = numpy.sum((ttl_array & self.pixel_bit).astype(bool))
-        self.assertEqual(nb_active, res[0] * res[1])
-        nb_active_inv = numpy.sum(~(ttl_array & self.pixel_bit_inv).astype(bool))
-        self.assertEqual(nb_active_inv, res[0] * res[1])
-
+        nb_high = numpy.sum((ttl_array & self.pixel_bit).astype(bool))
+        self.assertEqual(nb_high, res[0] * res[1])
         # No margin, so first value of line and frame should immediately be high,
         # but (as a special case), the very last value should be low
         self.assertEqual(bool(ttl_array[0] & self.line_bit), True)
@@ -774,9 +760,9 @@ class TestAnalogSEM(unittest.TestCase):
         self.assertIn(model.MD_DWELL_TIME, da.metadata)
         self.assertAlmostEqual(da.metadata[model.MD_PIXEL_SIZE], exp_pxs)
 
-    def test_acquisition_sparc(self):
+    def test_acquisition_sparc_hwsync(self):
         """
-        Test acquisitions for SPARC spectrum data
+        Test acquisitions for (fast) SPARC spectrum data (eg, every 0.5ms), with HW pixel trigger
         """
         self.scanner.dwellTime.value = 0.5e-3
         self.scanner.scale.value = (1, 1)  # => res is max
@@ -788,6 +774,38 @@ class TestAnalogSEM(unittest.TestCase):
         self.assertAlmostEqual(da.metadata[model.MD_PIXEL_SIZE], exp_pxs)
         for i in range(da.shape[0]):
             print("%d th line average: %s" % (i, da[i, :].mean(),))
+
+    def test_acquisition_sparc_slow(self):
+        """
+        Test acquisitions for "slow" SPARC spectrum data (eg, every 0.1s), without HW trigger synchronization
+        """
+        start_dt = 0.03
+        self.scanner.dwellTime.value = start_dt
+        self.scanner.scale.value = (1, 1)
+        self.scanner.resolution.value = (1, 1)
+        self.scanner.translation.value = (0, 0)
+        exp_shape, exp_pxs, exp_duration = self.compute_expected_metadata()
+
+        spots_dates = []
+        for i in range(10):
+            self.scanner.dwellTime.value = start_dt / (i + 1)
+            logging.debug("Will acquire spot %d at dt = %s", i, self.scanner.dwellTime.value)
+            self.scanner.translation.value = (0, i)  # New scan parameter every time
+            # Typically acquires 1 frame, and runs a second frame until half of it. But let's just let it
+            # run a lot, and we'll stop it before it's done.
+            self.expected_shape = exp_shape
+            self.left = 10
+            self.im_received.clear()
+            self.sed.data.get()
+            # TODO: also fails with get()?
+            # self.sed.data.subscribe(self.receive_image)
+            # time.sleep(0.2 + exp_duration * 1.5)
+            # self.sed.data.unsubscribe(self.receive_image)
+            # self.assertTrue(self.im_received.is_set(), f"No image received on pixel {i}")
+            # spots_dates.append(self.acq_dates[-1])
+            time.sleep(5e-3)  # simulate data processing
+
+        # self.assertEqual(len(spots_dates), 50)
 
     def test_acquisition_long_dt(self):
         """

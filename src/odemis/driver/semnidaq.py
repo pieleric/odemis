@@ -610,8 +610,9 @@ class Acquirer:
         self._do_data_end = self._scanner._generate_signal_array_end()
         self._do_task_end = nidaqmx.Task()
         self._scanner.configure_do_task(self._do_task_end)
-        self._do_task_end.write(self._do_data_end, auto_start=True)
-        logging.debug(f"Reset fast TTL signals to 0b{self._do_data_end[0]:b}")
+        if self._do_data_end is not None:
+            self._do_task_end.write(self._do_data_end, auto_start=True)
+            logging.debug(f"Reset fast TTL signals to 0b{self._do_data_end[0]:b}")
 
         self._ao_task = None
         self._ao_writer = None

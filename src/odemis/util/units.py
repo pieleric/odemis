@@ -30,6 +30,7 @@ import numpy
 import re
 
 
+# FIXME: should be 2 constants
 SI_PREFIXES = {
     9: "G",
     6: "M",
@@ -153,6 +154,9 @@ def to_string_si_prefix(x, sig=None):
         x = round_significant(x, sig)
 
     value, prefix = to_si_scale(x)
+    # TODO: shouldn't rely on to_string_pretty() which does everything again, and add an e-notation
+    # which could be weird for very small values or very big values out of the range of the prefix
+    # => just merge with a flag, or share subfunctions.
     return "%s %s" % (to_string_pretty(value, sig), prefix)
 
 
@@ -202,7 +206,7 @@ def to_string_pretty(x, sig=None, unit=None):
 
     Returns:
         (str): the decimal representation of the number with possibly a unit prefix to indicate the
-        magnitude (but _not_ the unit).
+        magnitude (but _not_ the unit). FIXME
 
         It can also return "unknown" or "∞" for NaN and inf.
 
@@ -211,7 +215,6 @@ def to_string_pretty(x, sig=None, unit=None):
     if x == 0:
         # don't consider this a float
         return "0"
-
     elif math.isnan(x):
         return "unknown"
     elif math.isinf(x):
@@ -220,45 +223,54 @@ def to_string_pretty(x, sig=None, unit=None):
         else:
             return "∞"
 
+    if isinstance(x, numpy.floating):
+        x = float(x)  # convert to standard float to get the standard display
+
     if sig is not None:
         x = round_significant(x, sig)
 
     # so close from an int that it's very likely one?
-    if abs(x - round(x)) < 1e-5 and abs(x) >= 1:
-        x = int(round(x))  # avoid the .0
+    if sig and sig > 5:
+        rtol = 10 ** -sig
+    else:
+        rtol = 1e-5
 
-    if isinstance(x, float):
-        if isinstance(x, numpy.floating):
-            x = float(x)  # convert to standard float to get the standard display
+    round_x = round(x)
+    if abs(x - round_x) < rtol and abs(x) >= 1:
+        x = round_x  # avoid the .0
 
-        str_val = "%r" % x
+    if not isinstance(x, float):
+        return str(x)
 
-        if unit in IGNORE_UNITS:
-            return str_val
-        else:
-            # Get the scale that a readable (formatted) string would use
-            eo, _ = get_si_scale(x)
-            scale = int(round(math.log(eo, 10)))
+    # Float: repr does a good job. We just round the e-notation to a multiple of 3 (if this notation is used)
+    str_val = repr(x)
 
-            fn, _, ep = str_val.partition('e')
-            ep = int(ep or 0)
+    # TODO: why special case for odd units, if it's just about rounding the e-notation?
+    if unit in IGNORE_UNITS:
+        return str_val
 
-            dot_move = ep - scale
+    # FIXME: this doesn't return a prefix, but round e to group of 3?
+    # Get the scale that a readable (formatted) string would use
+    eo, _ = get_si_scale(x)
+    scale = round(math.log(eo, 10))
 
-            if dot_move and '.' in fn:
-                dot_pos = fn.index('.')
-                new_dot_pos = dot_pos + dot_move
-                fn = fn.replace(".", "")
+    fn, _, ep = str_val.partition('e')
+    ep = int(ep or 0)
 
-                if new_dot_pos > len(fn):
-                    fn = fn.ljust(new_dot_pos, '0')
+    dot_move = ep - scale
 
-                fn = ".".join([fn[:new_dot_pos], fn[new_dot_pos:]])
-                return "%se%d" % (fn.strip('0').strip('.'), scale)
-            else:
-                return str_val
+    if dot_move and '.' in fn:
+        dot_pos = fn.index('.')
+        new_dot_pos = dot_pos + dot_move
+        fn = fn.replace(".", "")
 
-    return "%s" % x
+        if new_dot_pos > len(fn):
+            fn = fn.ljust(new_dot_pos, '0')
+
+        fn = ".".join([fn[:new_dot_pos], fn[new_dot_pos:]])
+        return "%se%d" % (fn.strip('0').strip('.'), scale)
+    else:
+        return str_val
 
 
 def readable_str(value, unit=None, sig=None):
@@ -274,6 +286,12 @@ def readable_str(value, unit=None, sig=None):
 
     return (string)
     """
+    # TODO: add an option to round to the number of significant figures. Otherwise, use the whole space
+    # needed to display the number. Ex:
+    # 2.56 -> 2.5
+    # 25.6 -> 26
+    # 256 -> 256 vs 260 (round_to_sig = True)
+    # 999.7 -> 1000 vs 1000 (round_to_sig = True)
     # TODO: convert % to ‰ when small value?
     # check against our black list of units which don't support SI prefix
 

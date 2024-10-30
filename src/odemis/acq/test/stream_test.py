@@ -4212,7 +4212,7 @@ class SPARC2TestCaseIndependentDetector(unittest.TestCase):
         ebics.roi.value = (0, 0.2, 0.3, 0.6)
 
         # dwell time of sems shouldn't matter
-        ebics.detDwellTime.value = 1e-6  # s
+        ebics.detDwellTime.value = 2e-6  # s
 
         ebics.repetition.value = (500, 700)
         exp_pos, exp_pxs, exp_res = roi_to_phys(ebics)
@@ -4246,7 +4246,7 @@ class SPARC2TestCaseIndependentDetector(unittest.TestCase):
         dc = leech.AnchorDriftCorrector(self.ebeam, self.sed)
         dc.period.value = 1
         dc.roi.value = (0.525, 0.525, 0.6, 0.6)
-        dc.dwellTime.value = 2e-06
+        dc.dwellTime.value = 3e-06
         sems.leeches.append(dc)
 
         ebics.repetition.value = (1200, 1100)
@@ -4259,11 +4259,16 @@ class SPARC2TestCaseIndependentDetector(unittest.TestCase):
         f = sms.acquire()
 
         # wait until it's over
-        data = f.result(timeout)
+        data, error = f.result(timeout)
+        self.assertIsNone(error)
         dc.series_complete(data)
         dur = time.time() - start
         logging.debug("Acquisition took %g s", dur)
         self.assertTrue(f.done())
+        for da in sms.raw:
+            print(f"raw shape {da.shape}, dtype {da.dtype}, metadata {da.metadata.get(model.MD_DESCRIPTION)}")
+        for da in data:
+            print(f"data shape {da.shape}, dtype {da.dtype}, metadata {da.metadata.get(model.MD_DESCRIPTION)}")
         self.assertEqual(len(data), len(sms.raw))
         # Both SEM and CL should have the same shape (and last one is anchor region)
         self.assertEqual(len(sms.raw), 3)

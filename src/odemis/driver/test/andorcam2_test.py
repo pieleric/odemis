@@ -32,10 +32,11 @@ from cam_test_abs import (VirtualStaticTestCam, VirtualTestCam,
                           VirtualTestSynchronized)
 from odemis import model
 from odemis.driver import andorcam2
+from odemis.util import driver
 
 logging.basicConfig(level=logging.DEBUG,
                     format="%(asctime)s  %(levelname)-7s %(module)-15s: %(message)s",
-                    # force=True  # Overwrite the default logging set by importing other module (Py 3.8+)
+                    force=True  # Overwrite the default logging set by importing other module (Py 3.8+)
                     )
 
 # Export TEST_NOHW=1 to force using only the simulator and skipping test cases
@@ -52,7 +53,8 @@ KWARGS = dict(name="camera", role="ccd", device=0, transpose=[2, -1],
               )
 KWARGS_SIM = dict(name="camera", role="ccd", device=0, transpose=[2, -1],
                   emgains=[[10e6, 1, 50], [1e6, 1, 150]],
-                  image="andorcam2-fake-clara.tiff")
+                  #image="andorcam2-fake-clara.tiff"  #DEBUG
+                  )
 KWARGS_SIM_SW_TRIG = KWARGS_SIM.copy()
 KWARGS_SIM_SW_TRIG["sw_trigger"] = True
 
@@ -103,6 +105,36 @@ class TestAndorCam2(VirtualTestCam, unittest.TestCase):
     """
     camera_type = CLASS
     camera_kwargs = KWARGS
+
+    def test_memory(self):
+        """
+        Test that the camera does not leak memory when acquiring images
+        """
+        self.camera.exposureTime.value = self.camera.exposureTime.range[0]
+
+        t_end = time.time() + 30
+        m_start = driver.readMemoryUsage()
+        i = 0
+        while time.time() < t_end:
+            im = self.camera.data.get()
+            i += 1
+        m_end = driver.readMemoryUsage()
+        logging.info("Memory usage after %d frames: %s MB", i, (m_end - m_start) / 1024**2)
+        # FIXME: should be less than 100MB
+
+    def test_memory_sub(self):
+        """
+        Test that the camera does not leak memory when acquiring images
+        """
+        self.camera.exposureTime.value = self.camera.exposureTime.range[0]
+
+        m_start = driver.readMemoryUsage()
+        self.left = 1000000
+        self.camera.data.subscribe(self.receive_image)
+        time.sleep(30)
+        self.camera.data.unsubscribe(self.receive_image)
+        m_end = driver.readMemoryUsage()
+        logging.info("Memory usage: %s MB", (m_end - m_start) / 1024**2)
 
 
 class TestAndorCam2HwTrigger(unittest.TestCase):

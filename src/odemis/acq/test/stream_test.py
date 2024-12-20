@@ -2897,9 +2897,9 @@ class SPARC2StreakCameraTestCase(unittest.TestCase):
         stss = stream.SEMTemporalSpectrumMDStream("test sem-temporal spectrum", [sems, streaks])
 
         streaks.detStreakMode.value = True
-        streaks.detExposureTime.value = 0.01  # 10ms
+        streaks.detExposureTime.value = 0.1  # 100ms
         # Disable the protections
-        streaks.detMCPGain.value = 10
+        streaks.detMCPGain.value = 5
         streaks.detShutter.value = False
 
         # # TODO use fixed repetition value -> set ROI?

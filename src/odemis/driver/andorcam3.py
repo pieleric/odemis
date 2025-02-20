@@ -364,9 +364,14 @@ class AndorCam3(model.DigitalCamera):
                                           unit="s", setter=self.setExposureTime)
 
         ror_choices = set(self.getReadoutRates())
+        # TODO: detect that there is only one readout per gain
+        # One option would be to select every single gain, and check whether for each of them, there
+        # is only one gain "available" (using _applyReadoutRate)... or the alternative is to just
+        # hard-code the list of hardware which have a fixed readout rate per gain (ie, the Sona and Marana).
+        # cf CameraModel .
         readout_rate = min(ror_choices) # default to slow acquisition (as it's usually fast enough)
         self.readoutRate = model.FloatEnumerated(readout_rate, ror_choices,
-                                                 unit="Hz")
+                                                 unit="Hz", readonly=True)
 
         gain_choices = self._getGains() # dict gain -> desc
         # 1.1 is the 16-bit large setting which fits almost every case
@@ -986,7 +991,7 @@ class AndorCam3(model.DigitalCamera):
             serial_str = ""
 
         try:
-            # seems to be a pretty useless int indentifyin the framegrabber in the PC
+            # seems to be a pretty useless int indentifying the framegrabber in the PC
             cont = self.GetString(u"ControllerID")
             cont_str = " (controller: %s)" % cont
         except ATError:
@@ -1449,7 +1454,8 @@ class AndorCam3(model.DigitalCamera):
             if not util.almost_equal(readout_rate, req_readout_rate):
                 logging.warning("Failed to select readout rate %s, falling back to %s",
                                 req_readout_rate, readout_rate)
-            self.readoutRate.value = readout_rate  # in case it's updated
+            # self.readoutRate.value = readout_rate  # in case it's updated
+            self.readoutRate._set_value(readout_rate, force_write=True)#DEBUG for Sona
             self._metadata[model.MD_READOUT_TIME] = 1 / readout_rate  # s
             logging.debug("Updating readout rate to %g MHz", readout_rate / 1e6)
 
@@ -1480,6 +1486,9 @@ class AndorCam3(model.DigitalCamera):
         fr_rng = self.GetFloatRanges(u"FrameRate")
         self.SetFloat(u"FrameRate", fr_rng[1])
         logging.debug("Framerate set to %g fps", self.GetFloat(u"FrameRate"))
+        if self.GetFloat(u"FrameRate") > 40:  # Maximum sustainable framerate on Sona?! (can do 68 at 16bits or 135 at 11 bits)
+            self.SetFloat(u"FrameRate", 40)
+            logging.debug("Clipping framerate to %g fps", self.GetFloat(u"FrameRate"))
 
         # Baseline depends on the other settings
         # Note: it seems that the noise is not really symmetrical, and with high
@@ -1607,7 +1616,7 @@ class AndorCam3(model.DigitalCamera):
         """
         The core of the acquisition thread. Runs until acquire_must_stop is True.
         """
-        nbuffers = 2
+        nbuffers = 10
         num_gc = 0
         num_errors = 0
         need_reinit = True
@@ -1775,6 +1784,7 @@ class AndorCam3(model.DigitalCamera):
             try:
                 pbuffer, _ = self.WaitBuffer(0.1)
             except ATError as exp:
+                logging.debug("Waiting longer for image")
                 if exp.errno == 13 and time.time() <= time_end:  # AT_ERR_TIMEDOUT
                     continue
                 else:
@@ -1789,11 +1799,12 @@ class AndorCam3(model.DigitalCamera):
 
         # Check if there is already a newer image
         discarded = 0
+        logging.debug("Checking for newer images (max discard = %d)", max_discard)
         for discarded in range(max_discard):
             try:
-                # BUG: it sometimes return a timeout even if the queue is building up
+                # BUG: it sometimes returns a timeout even if the queue is building up
                 # (depends on the framerate and data size)
-                pbuffer, _ = self.WaitBuffer(0)  # only if it's already there
+                pbuffer, _ = self.WaitBuffer(0.001)  # only if it's already there DEBUG (0)
             except ATError as exp:
                 if exp.errno == 13:  # AT_ERR_TIMEDOUT
                     logging.debug("Hardware queue seems empty")
@@ -1802,7 +1813,7 @@ class AndorCam3(model.DigitalCamera):
                 raise
 
             # Queue immediately a new buffer to compensate
-            logging.debug("Queuing a new buffer (queue len = %d)", len(buffers))
+            logging.debug("New image ready, will now queue a new buffer (queue len = %d)", len(buffers))
             cbuffer = self._allocate_buffer(size)
             self.QueueBuffer(cbuffer)
             buffers.append(cbuffer)

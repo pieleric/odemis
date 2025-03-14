@@ -320,7 +320,7 @@ class MetadataUpdater(model.Component):
         if 'slit-monochromator' not in pos:
             logging.info("No 'slit-monochromator' axis was found, will not be able to compute monochromator bandwidth.")
             wl = pos["wavelength"]
-            if wl < 10e-9:
+            if wl < 10e-9:  # 0 (or very small value) indicates it's in 0th order mode => all light is passed
                 return None
             return (wl, wl)
         else:

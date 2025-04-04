@@ -592,6 +592,20 @@ class AcquisitionSettings:
         self.ci_sample_rate = ao_osr / dwell_time  # Hz
         self.ci_samples_n = positions_n * ao_osr
 
+        # Compute the detector signal delay in terms of input samples
+        self.adet_delay_samples = []  # number of samples to skip for applying the "signal delay"
+        for det in analog_detectors:
+            s = round(det.signal_delay * self.ai_sample_rate)
+            self.adet_delay_samples.append(s)
+
+        # TODO: the ci_sample_rate is very low typically, so that's going to cause the delay to
+        # almost always be 0 samples. It might be best to apply the delay in the task triggering
+        # (which would work fine for the counting tasks, as there is a separate one per detector)
+        self.cdet_delay_samples = []
+        for det in counting_detectors:
+            s = round(det.signal_delay * self.ci_sample_rate)
+            self.cdet_delay_samples.append(s)
+
         # These values will be computed later
         # Chunk: number of samples to read/write at once
         self.ai_chunk_size = None
@@ -1077,10 +1091,14 @@ class Acquirer:
           that is as close as possible, but less or equal to that period.
         :return: number of samples in the AI acquisition per channel
         """
+        ai_extra_samples = max(acq_settings.adet_delay_samples)
+
+        # Add the delay to a whole frame, so that the first complete fits
+        delayed_ai_samples_n = acq_settings.ai_samples_n + ai_extra_samples
         # Does it fit a whole frame?
-        if acq_settings.ai_samples_n / acq_settings.ai_sample_rate < period:
+        if delayed_ai_samples_n / acq_settings.ai_sample_rate < period:
             logging.debug("AI chunk set to the size of a whole frame")
-            return max(2, acq_settings.ai_samples_n)  # The buffer must be at least of length 2 for the hardware
+            return max(2, delayed_ai_samples_n)  # The buffer must be at least of length 2 for the hardware
 
         # Can we fit a whole line? If so, how many lines per period?
         line_length = acq_settings.res[0] * acq_settings.ai_osr
@@ -1105,7 +1123,7 @@ class Acquirer:
 
         # OK... let's give up, even a pixel doesn't fit in a period, so just fit exactly the number of samples
         logging.debug("AI chunk set to less than a pixel")
-        return min(max(2, int(acq_settings.ai_sample_rate * period)), acq_settings.ai_samples_n)
+        return min(max(2, int(acq_settings.ai_sample_rate * period)), delayed_ai_samples_n)
 
     def _acquire_sync(self, detectors: list):
         """
@@ -1209,9 +1227,11 @@ class Acquirer:
 
         # we want to read not too frequently as it'd have a large overhead, and not too unfrequently
         # as this would require a huge memory buffer to process all at once: CHUNK_DURATION.
+        ai_extra_samples = max(acq_settings.adet_delay_samples)
         acq_settings.ai_chunk_size = self._find_good_ai_chunk_size(acq_settings, CHUNK_DURATION)
-        logging.debug("Using a AI chunk of %s samples (%s s) => %g chunks per frame",
+        logging.debug("Using a AI chunk of %s samples (%s s) + %s discarded samples => %g chunks per frame",
                       acq_settings.ai_chunk_size, acq_settings.ai_chunk_size / acq_settings.ai_sample_rate,
+                      ai_extra_samples,
                       acq_settings.ai_samples_n / acq_settings.ai_chunk_size)
         # Use a buffer to hold 2 chunks, so that while we read the latest chunk the board can keep
         # going by writing into the "next chunk", which is the rest of the buffer.
@@ -1223,7 +1243,7 @@ class Acquirer:
             acq_settings.ai_buffer_size = max(acq_settings.ai_buffer_size, min_ai_buffer_size)
         else:  # finite
             # If only going to read it once, no need to have a very large buffer (but at least 2 for the HW)
-            acq_settings.ai_buffer_size = max(2, min(acq_settings.ai_buffer_size, acq_settings.ai_samples_n))
+            acq_settings.ai_buffer_size = max(2, min(acq_settings.ai_buffer_size, acq_settings.ai_samples_n + ai_extra_samples))
 
         ao_samples_n_per_frame = acq_settings.ao_samples_n
         if not continuous and counting_dets:
@@ -1415,6 +1435,9 @@ class Acquirer:
 
         # Acquire data until a STOP message is received (or only once if it's a single frame)
         should_stop = not acq_settings.continuous
+        # Number of samples that will be skiped before filling the (first) frame, per detector
+        ai_samples_to_skip = acq_settings.adet_delay_samples.copy()
+
         # Place to store the raw AI data, with over-sampling
         ai_buffer_full = numpy.empty((n_analog_det, acq_settings.ai_chunk_size), dtype=self._ai_dtype)
         acc_dtype = get_best_dtype_for_acc(ai_buffer_full.dtype, acq_settings.ai_osr)
@@ -1437,17 +1460,24 @@ class Acquirer:
         if ci_tasks:
             logging.debug("Will acquire %s CI sample/AI sample", n_ci_samples_per_ai_sample)
 
+        # The actual frame data, after downsampling.
+        ai_data_next = numpy.empty((n_analog_det, acq_settings.res[1], acq_settings.res[0]),
+                                    dtype=self._ai_dtype)
+        acquired_n = [-v for v in ai_samples_to_skip]
         while True:
             # Prepare the metadata, with the settings at the beginning of acquisition
             # Update at every frame as metadata can change at any time (ex: MD_PIXEL_SIZE, MD_POS)
             analog_mds, counting_mds = self._get_images_metadata(acq_settings)
 
+            ai_data = ai_data_next
             # The actual frame data, after downsampling.
-            ai_data = numpy.empty((n_analog_det, acq_settings.res[1], acq_settings.res[0]),
+            ai_data_next = numpy.empty((n_analog_det, acq_settings.res[1], acq_settings.res[0]),
                                   dtype=self._ai_dtype)
-            acquired_n = 0
+
             prev_samples_n = [0] * n_analog_det
             prev_samples_sum = [0] * n_analog_det
+
+            ai_samples_to_acquire = acq_settings.ai_samples_n + max(ai_samples_to_skip)
 
             if ci_tasks:
                 ci_data = numpy.empty((n_counting_det, acq_settings.res[1], acq_settings.res[0]),
@@ -1456,13 +1486,18 @@ class Acquirer:
                 ci_prev_samples_n = [0] * n_counting_det
                 ci_prev_samples_sum = [0] * n_counting_det
 
-            while acquired_n < acq_settings.ai_samples_n:
+            # TODO: drop doing it precisely 1 frame at a time: keep acquiring chunks, and whenever
+            # data for one detector is ready, send that data.
+
+            # Receive data until 1 frame is fully acquired
+            while acquired_n < ai_samples_to_acquire:
                 new_samples_n, prev_samples_n, prev_samples_sum = self._read_ai_buffer(
                     acq_settings,
-                    ai_reader, ai_data, ai_buffer_full, acquired_n,
-                    acc_dtype, prev_samples_n, prev_samples_sum)
+                    ai_reader, ai_data, ai_data_next, ai_buffer_full, acquired_n,
+                    acc_dtype, prev_samples_n, prev_samples_sum,
+                    )
 
-                acquired_n += new_samples_n
+                acquired_n = [v + new_samples_n for v in acquired_n]
 
                 # Is it time to acquire CI?
                 if ci_tasks:
@@ -1482,6 +1517,13 @@ class Acquirer:
                     logging.debug("Discarding message during acquisition: %s", m)
 
                 # End of buffer read
+
+                # Any image ready? -> for the specific detector, build & send the image.
+                # Then, prepare the data for next frame, for the specific detector.
+                for i, d in enumerate(acq_settings.analog_detectors):
+                    if acquired_n[i] >=
+                    im = model.DataArray(ai_data[i], analog_mds[i])
+                    d.data.notify(im)
 
             logging.debug(f"Acquired one frame of {ai_data.shape} px, with {acquired_n} samples")
 
@@ -1687,12 +1729,15 @@ class Acquirer:
             ao_samples_n = max(2, acq_settings.ao_samples_n)
             do_samples_n = max(2, acq_settings.do_samples_n)
             ci_samples_n = max(2, acq_settings.ci_samples_n)
-            if acq_settings.ai_chunk_size >= acq_settings.ai_samples_n:
+
+            ai_extra_samples = max(acq_settings.adet_delay_samples)
+            delayed_ai_samples_n = acq_settings.ai_samples_n + ai_extra_samples
+            if acq_settings.ai_chunk_size >= delayed_ai_samples_n:
                 # If buffer is big enough to contain all the samples, it's a sign that it's going to
                 # be a small & short acquisition => need to stop automatically, otherwise the SDK complains
                 # we don't read fast enough
                 ai_sample_mode = AcquisitionType.FINITE
-                ai_samples_n = max(2, acq_settings.ai_samples_n)
+                ai_samples_n = max(2, delayed_ai_samples_n)
             else:
                 # AI always runs are (almost) the maximum sample rate, so it can be a very large number
                 # of samples for large acquisition, larger than what is supported by the SDK.
@@ -3083,6 +3128,7 @@ class AnalogDetector(model.Detector):
                  limits: Tuple[float, float],
                  active_ttl: Optional[Dict[int, Tuple[bool, bool, Optional[str]]]] = None,
                  activation_delay: float = 0,
+                 signal_delay: float = 0,
                  **kwargs):
         """
         :param channel (0<= int): input channel from which to read
@@ -3091,6 +3137,8 @@ class AnalogDetector(model.Detector):
         :param active_ttl: digital output port to activate when the detector is active.
         Same format as the Scanner scanning_ttl argument.
         :param activation_delay (0<=float): minimum time (s) to wait when activating the detector
+        :param signal_delay (0<=float): time (s) the signal from the detector is delayed compared to the
+        e-beam scanning voltage signal.
         via the TTL. If there is no active_ttl, this has no effect.
         """
         # It will set up ._shape and .parent
@@ -3126,6 +3174,10 @@ class AnalogDetector(model.Detector):
         self.active_ttl_mng = ActiveTTLManager(parent, self, active_ttl or {}, activation_delay)
 
         self._metadata[model.MD_DET_TYPE] = model.MD_DT_NORMAL
+
+        if not (0 <= signal_delay <= 0.1):  # 0.1s: arbitrary "extremely large" value for detector delay
+            raise ValueError(f"signal_delay must be between 0 and 0.1s, but got {signal_delay} s")
+        self.signal_delay = signal_delay
 
     def terminate(self):
         super().terminate()
@@ -3203,6 +3255,9 @@ class CountingDetector(model.Detector):
         self.softwareTrigger = model.Event()
 
         self._metadata[model.MD_DET_TYPE] = model.MD_DT_INTEGRATING
+
+        # TODO: copy from AnalogDetector
+        self.signal_delay = 0
 
     def terminate(self):
         super().terminate()

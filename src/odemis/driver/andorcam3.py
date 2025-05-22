@@ -31,6 +31,8 @@ from ctypes import *
 import gc
 import glob
 import logging
+from typing import Tuple
+
 import numpy
 from odemis import model, util
 from odemis.model import HwError, oneway
@@ -187,8 +189,8 @@ TEMP_NO_COOLING = 25  # °C, fake target temperature indicating that cooling sho
 # This is dependent on the gain (and readout rate, which is directly linked)
 # The prediction formula is: 1/fps = a * (number of pixels) + b
 SONA_B6_USB_FPS_COEFS = {  # gain bits -> a, b
-    20: (xxx),  # 11 bits (high speed)
-    1: (xxx),  # 12 bits (low noise)
+    20: (None, None),  # 11 bits (high speed)  # FIXME: compute
+    1: (None, None),  # 12 bits (low noise)
     1.1: (0.00116564113800147, 5.63174452555119E-09), # 16 bits
 }
 
@@ -390,7 +392,7 @@ class AndorCam3(model.DigitalCamera):
         ror_readonly = self._is_sona  # Sona has just one read out rate per gain => don't allow to change it
         # TODO: should be updated immediately after
         self.readoutRate = model.FloatEnumerated(readout_rate, ror_choices,
-                                                 unit="Hz", readonly=self._is_sona)
+                                                 unit="Hz", readonly=ror_readonly)
 
         gain_choices = self._getGains() # dict gain -> desc
         # 1.1 is the 16-bit large setting which fits almost every case
@@ -470,7 +472,7 @@ class AndorCam3(model.DigitalCamera):
         """
         # Read what the SDK report as maximum
         fr_rng = self.GetFloatRanges("FrameRate")
-        if sona:
+        if self._is_sona:
             # linear regression
             num_px = res[0] * res[1]
             fps_inv = SONA_B6_USB_FPS_COEFS[0] + num_px * SONA_B6_USB_FPS_COEFS[1]
@@ -1525,6 +1527,7 @@ class AndorCam3(model.DigitalCamera):
         fr_rng = self.GetFloatRanges(u"FrameRate")
         self.SetFloat(u"FrameRate", fr_rng[1])
         logging.debug("Framerate set to %g fps", self.GetFloat(u"FrameRate"))
+        # FIXME
         if self.GetFloat(u"FrameRate") > 40:  # Maximum sustainable framerate on Sona?! (can do 68 at 16bits or 135 at 11 bits)
             self.SetFloat(u"FrameRate", 40)
             logging.debug("Clipping framerate to %g fps", self.GetFloat(u"FrameRate"))
@@ -1655,7 +1658,7 @@ class AndorCam3(model.DigitalCamera):
         """
         The core of the acquisition thread. Runs until acquire_must_stop is True.
         """
-        nbuffers = 10
+        nbuffers = 10  # FIXME: why so many?
         num_gc = 0
         num_errors = 0
         need_reinit = True

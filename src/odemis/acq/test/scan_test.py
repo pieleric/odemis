@@ -83,6 +83,7 @@ class TestGenerateScanVector(unittest.TestCase):
         )
         self.assertEqual(margin, 0)
 
+        # FIXME: is that correct? 2 px should be less than 1 percent, so still no margin?
         # > 1 pixel => > 1 pixel margin
         res = (2, 512)
         roi = (0, 0, 2 / 768, 1.0)

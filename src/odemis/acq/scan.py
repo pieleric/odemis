@@ -94,8 +94,8 @@ def generate_scan_vector(scanner: model.HwComponent,
 
     # TODO: compute metadata
     md_cor = {
-        MD_PIXEL_SIZE_COR: (1, 1),
+        MD_PIXEL_SIZE_COR: (1, 1), # FIXME
         MD_ROTATION_COR: rotation,
-        MD_POS_COR: translation,  # FIXME: * pixel size
+        MD_POS_COR: translation,  # FIXME: * scanner.pixelSize.value
     }
     return scan_vector, margin, md_cor

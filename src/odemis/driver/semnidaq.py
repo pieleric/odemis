@@ -1209,6 +1209,11 @@ class Acquirer:
                           "continuous acquisition, will use synchronized acquisition")
             return False
 
+        # Immediately write the first pixel, to give extra time for the e-beam to move there (from
+        # the park position, which can be far away), while we are readying the hardware.
+        pixel0_data = numpy.ascontiguousarray(scan_array[:, :1])
+        self._scanner._write_park_position(pixel0_data)
+
         # TODO: now that the AO/DO data is sent in small pieces, we could duplicate it "on the fly"
         # when ao_osr >= 1. In these cases, the sampling rate is always very small (by definition)
         # so it's OK to do memory copy. This would avoid the (unlikely) case of
@@ -2390,7 +2395,10 @@ class Scanner(model.Emitter):
                        [park[1], limits[1][0] if limits[1][0] != park[1] else limits[1][1]]]
         self._park_task = nidaqmx.Task()
         self.configure_ao_task(self._park_task, park_limits)
-        self._park_data = numpy.array(park, dtype=float)  # We write directly the voltage, so "float"
+        self._park_writer = AnalogUnscaledWriter(self._park_task.out_stream, auto_start=True)
+        self._park_data = numpy.array([[self.volt_to_raw(self._park_task.ao_channels[0], park[0])],
+                                       [self.volt_to_raw(self._park_task.ao_channels[1], park[1])]],
+                                      dtype=numpy.int16)
 
         # Manage the "slow" TTL signals
         self.active_ttl_mng = ActiveTTLManager(parent, self, scanning_ttl or {}, scan_active_delay,
@@ -2852,17 +2860,20 @@ class Scanner(model.Emitter):
         if not active:
             self._write_park_position()
 
-    def _write_park_position(self):
+    def _write_park_position(self, data: Optional[numpy.ndarray] = None):
         """
         Set the beam to the park position. That's to ensure the beam is always at the same position
         when not scanning. Especially important when blanker TTL is not available.
+        :param data: if not None, the data to write to the ebeam position of shape (2, 1), contiguous.
+         If None, it uses the park position.
         """
-        logging.debug("Setting to park position at %s", self._park_data)
         try:
-            self._park_task.write(self._park_data, auto_start=True)
-            logging.debug("Park position set")
+            if data is None:
+                data = self._park_data
+            logging.debug("Setting e-beam to fixed position %s, %s", data[0, 0], data[1, 0])
+            self._park_writer.write_int16(data)
         except nidaqmx.DaqError:
-            logging.warning("Failed to set to park position", exc_info=True)
+            logging.warning("Failed to set to fixed position", exc_info=True)
 
     # Waveform generation:
     # The goal is to generate the position of the e-beam in X and Y for the given dwell time and

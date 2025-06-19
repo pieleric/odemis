@@ -446,9 +446,18 @@ class AndorCam3(model.DigitalCamera):
         # Another advantage of global shutter allows to simplify if we need to
         # connect exposure to light.
 
+        filters = []
         if self.isImplemented("SpuriousNoiseFilter"):
             self.SetBool("SpuriousNoiseFilter", True)
-            self._metadata['Filter'] = "Spurious noise filter" # FIXME tag?
+            filters.append("Spurious noise")
+
+        # TODO: Test on Sona
+        if self.isImplemented("StaticBlemishCorrection"):
+            self.SetBool("StaticBlemishCorrection", True)
+            filters.append("Blemish correction")
+
+        if filters:
+            self._metadata[model.MD_DATA_FILTER] = ", ".join(filters)
 
         if self.isImplemented("Overlap"):
             # No overlap, as it can introduce additional noise, and we don't need

@@ -780,7 +780,7 @@ def project_angular_spectrum_to_grid(data: model.DataArray) -> model.DataArray:
         line_bottom = data.metadata[model.MD_AR_MIRROR_BOTTOM]
         line_top = data.metadata[model.MD_AR_MIRROR_TOP]
     except KeyError:
-        raise ValueError("Metadata required: MD_MIRROR_*, MD_WL_LIST")
+        raise ValueError("Metadata required: MD_AR_MIRROR_*, MD_WL_LIST")
     if len(wl_list) != data.shape[1]:
         raise ValueError(f"MD_WL_LIST must be the same length as C dimension ({len(wl_list)} != {data.shape[1]})")
 

@@ -453,6 +453,7 @@ class AndorCam3(model.DigitalCamera):
 
         # TODO: Test on Sona
         if self.isImplemented("StaticBlemishCorrection"):
+            logging.debug("Static blemish correction is set to %s", self.GetBool("StaticBlemishCorrection"))
             self.SetBool("StaticBlemishCorrection", True)
             filters.append("Blemish correction")
 

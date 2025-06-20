@@ -39,7 +39,7 @@ import numpy
 
 import odemis.util.driver as udriver
 from odemis import model
-from odemis.acq import drift
+from odemis.acq import drift, scan
 from odemis.acq import leech
 from odemis.acq.leech import AnchorDriftCorrector
 from odemis.acq.stream._live import LiveStream
@@ -951,6 +951,7 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
             assert px_idx == (0, 0)  # We expect that the first pixel is always the top left pixel
             # New polarization => new DataArray
             md = raw_data.metadata.copy()
+            # TODO: take rotation into account
             center, pxs = self._get_center_pxs(rep, (1, 1), self._pxs, pos_lt)
             md.update({MD_POS: center,
                        MD_PIXEL_SIZE: pxs,
@@ -2483,6 +2484,13 @@ class SEMMDStream(MultipleDetectorStream):
         return n_y, n_x
 
     def _runAcquisition(self, future) -> Tuple[List[model.DataArray], Optional[Exception]]:
+        if model.hasVA(self._emitter, "scanPath"):
+            return self._runAcquisitionVector(future)
+        else:
+            return self._runAcquisitionRectangle(future)
+
+
+    def _runAcquisitionRectangle(self, future) -> Tuple[List[model.DataArray], Optional[Exception]]:
         """
         Acquires images from the multiple detectors via software synchronisation.
         Warning: can be quite memory consuming if the grid is big
@@ -2738,6 +2746,278 @@ class SEMMDStream(MultipleDetectorStream):
             self._acq_done.set()
 
         return self.raw, error
+
+    def _runAcquisitionVector(self, future) -> Tuple[List[model.DataArray], Optional[Exception]]:
+        """
+        Acquires images from the multiple detectors via software synchronisation.
+        Warning: can be quite memory consuming if the grid is big
+        :returns
+            list of DataArray: All the data acquired.
+            error: None if everything went fine, an Exception if an error happened, but some data has
+              already been acquired.
+        raises:
+          CancelledError() if cancelled
+          Exceptions if error
+        """
+        error = None
+        try:
+            self._acq_done.clear()
+            # TODO: the real dwell time used depends on how many detectors are used, and so it can
+            # only be known once we start acquiring. One way would be to set a synchronization, and
+            # then subscribe all the detectors, and finally check the dwell time.
+            px_time = self._adjustHardwareSettings()
+            # spot_pos = self._getSpotPositions()
+            # pos_flat = spot_pos.reshape((-1, 2))  # X/Y together (X iterates first)
+
+            rep = tuple(self.repetition.value)
+            roi = self.roi.value
+            pos_flat, margin, md_cor = scan.generate_scan_vector(self._emitter, rep, roi, rotation=0, dwell_time=px_time)
+            # Drop center metadata so that we don't use it by mistake when acquiring a sub-region.
+            # It's computed separately using the top-left position.
+            del md_cor[model.MD_POS_COR]
+
+            #  margin, nx
+            # ┌──────────────┐
+            # │1 1:1 2 3     │
+            # │4 4:4 5 6     │
+            # │   :          │
+            # └──────────────┘
+            # ^ ny lines
+
+            self._acq_data = [[] for _ in self._streams]  # just to be sure it's really empty
+            self._live_data = [[] for _ in self._streams]
+            self._current_scan_area = (0, 0, 0, 0)
+            self._raw = []
+            self._anchor_raw = []
+            logging.debug("Starting e-beam sync acquisition @ %s s with components %s",
+                          px_time, ", ".join(s._detector.name for s in self._streams))
+
+            tot_num = numpy.prod(rep)
+
+            pos_lt = self._getLeftTopPositionPhys()  # FIXME: handle rotation (and change to use the center of the RoA?)
+            self._pxs = self._getPixelSize()
+            self._scanner_pxs = self._emitter.pixelSize.value  # sub-pixel size
+
+            # initialize leeches
+            leech_np, leech_time_ppx = self._startLeeches(px_time, tot_num, (rep[1], rep[0]))
+
+            # number of spots scanned so far
+            spots_sum = 0
+            while spots_sum < tot_num:
+                # Acquire the maximum amount of pixels until next leech, and less than the live period
+                n_y, n_x = self._get_next_rectangle(rep, spots_sum, px_time, leech_np)
+                npixels2scan = n_x * n_y
+
+                px_idx = (spots_sum // rep[0], spots_sum % rep[0]) #current pixel index
+                self._current_scan_area = (px_idx[1],
+                                           px_idx[0],
+                                           px_idx[1] + n_x - 1,
+                                           px_idx[0] + n_y - 1)
+
+                # Update the resolution of the "independent" detectors
+                has_inde_detectors = False
+                for s in self._streams:
+                    det = s._detector
+                    if model.hasVA(det, "resolution"):
+                        has_inde_detectors = True
+                        det.resolution.value = (n_x, n_y)
+                        # It's unlikely but the detector could have specific constraints on the resolution
+                        # and refuse the requested one => better fail early.
+                        if det.resolution.value != (n_x, n_y):
+                            raise ValueError(f"Failed to set the resolution of {det.name} to {n_x} x {n_y} px: "
+                                             f"{det.resolution.value} px accepted")
+                        else:
+                            logging.debug("Set resolution of independent detector %s to %s",
+                                          det.name, (n_x, n_y))
+
+                # Take the points from the full scan vector that needs to be scan in this iteration
+                # need to skip the margin, if less than 1 line.
+                if n_y == 1:  # single line, or smaller => no need to use the margin
+                    next_px_flat = margin + px_idx[0] + px_idx[1] * (rep[0] + margin)
+                    scan_vector = pos_flat[next_px_flat:next_px_flat + npixels2scan]
+                    scan_margin = 0
+                else:  # multiple lines, so we can use the margin
+                    scan_vector_len = npixels2scan + margin * n_y
+                    next_px_flat = px_idx[0] + px_idx[1] * (rep[0] + margin)
+                    scan_vector = pos_flat[next_px_flat:next_px_flat + scan_vector_len]
+                    scan_margin = margin
+
+                # Compensate for the drift
+                if self._dc_estimator:
+                    tot_drift = self._dc_estimator.tot_drift
+                    # TODO: check the margin and limit the drift in case it'd go out of the margin
+                    clipped_drift = tot_drift
+                    scan_vector -= clipped_drift  # TODO: test
+                    logging.error("Drift of %s px caused acquisition region out "
+                                  "of bounds: limited to %s px",
+                                  tot_drift, clipped_drift)
+
+                self._emitter.scanPath.value = scan_vector
+
+                # and now the acquisition
+                for ce in self._acq_complete:
+                    ce.clear()
+
+                self._df0.synchronizedOn(self._trigger)
+                for s, sub in zip(self._streams, self._subscribers):
+                    s._dataflow.subscribe(sub)
+
+                start = time.time()
+                self._acq_min_date = start
+
+                if has_inde_detectors:
+                    # The independent detectors might need a bit of time to be ready.
+                    # If not waiting, the first pixels might be missed.
+                    # Note: ephemeron EBIC hardware needs at least 0.1s
+                    time.sleep(0.1)
+
+                self._trigger.notify()  # starts the e-beam scan
+                # Time to scan a frame
+                frame_time = px_time * npixels2scan
+
+                px_pos = (pos_lt[0] + px_idx[1] * self._pxs[0],
+                          pos_lt[1] - px_idx[0] * self._pxs[1])  # Y is inverted
+
+                # Wait for all the Dataflows to return the data. As all the
+                # detectors are linked together to the e-beam, they should all
+                # receive the data (almost) at the same time.
+                max_end_t = start + frame_time * 10 + 5
+                for i, s in enumerate(self._streams):
+                    timeout = max(5.0, max_end_t - time.time())
+                    if not self._acq_complete[i].wait(timeout):
+                        raise TimeoutError("Acquisition of repetition stream at pos %s timed out after %g s"
+                                           % (self._emitter.translation.value, time.time() - start))
+                    if self._acq_state == CANCELLED:
+                        raise CancelledError()
+                    s._dataflow.unsubscribe(self._subscribers[i])
+
+                for i, das in enumerate(self._acq_data):
+                    # TODO: where is the acq_data reset?
+                    last_da = das[-1]  # normally, there is only one DataArray
+                    if len(last_da) == 0:
+                        # It's OK to not receive data on the first detector (SEM).
+                        # It happens for instance with the Monochromator.
+                        raise IOError("No data received for stream %s" % (self._streams[i].name.value,))
+
+                    raw_da = scan.vector_data_to_img(last_da, (n_x, n_y), scan_margin, md_cor)
+                    raw_da = self._preprocessData(i, raw_da, px_idx)
+                    self._assembleLiveData2D(i, raw_da, px_idx, px_pos, rep, 0)
+
+                self._shouldUpdateImage()
+
+                spots_sum += npixels2scan
+
+                # remove synchronisation
+                self._df0.synchronizedOn(None)
+                self._emitter.scanPath.value = None  # disable vector scanning (for leeches)
+
+                if self._acq_state == CANCELLED:
+                    raise CancelledError()
+
+                leech_time_left = (tot_num - spots_sum) * leech_time_ppx
+                self._updateProgress(future, time.time() - start, spots_sum, tot_num, leech_time_left)
+
+                # Check if it's time to run a leech
+                for li, l in enumerate(self.leeches):
+                    if leech_np[li] is None:
+                        continue
+                    leech_np[li] -= npixels2scan
+                    if leech_np[li] < 0:
+                        logging.error("Acquired too many pixels, and skipped leech %s", l)
+                        leech_np[li] = 0
+                    if leech_np[li] == 0:
+                        try:
+                            np = l.next([d[-1] for d in self._acq_data])
+                        except Exception:
+                            logging.exception("Leech %s failed, will retry next pixel", l)
+                            np = 1  # try again next pixel
+                        leech_np[li] = np
+                        if self._acq_state == CANCELLED:
+                            raise CancelledError()
+
+                self._acq_data = [[] for _ in self._streams]  # delete acq_data to use less RAM
+            # Done!
+            with self._acq_lock:
+                if self._acq_state == CANCELLED:
+                    raise CancelledError()
+                self._acq_state = FINISHED
+            self._current_scan_area = None  # Indicate we are done for the live update
+
+            # broadcast all the self._live_data into self._raw and do post-processing
+            for stream_idx, das in enumerate(self._live_data):
+                if stream_idx == 0 and len(das) == 0:
+                    # It's OK to not have data for the SEM stream (e.g. Monochromator)
+                    continue
+                self._assembleFinalData(stream_idx, das)
+
+                try:
+                    if isinstance(self._streams[stream_idx], MonochromatorSettingsStream):
+                        # The Monochromator stream uses a chronogram view, which is not compatible with the RGB spatial image
+                        continue
+                    elif stream_idx >= 1:
+                        # Only update the CL stream
+                        self._streams[stream_idx]._onNewData(self._streams[stream_idx]._dataflow, self._raw[-1])
+                except Exception as e:
+                    logging.debug("Exception occurred during broadcast of all the self._live_data into self._raw and "
+                                  "doing post-processing of CL or Monochromator stream\n"
+                                  "reason: %e" % e)
+
+            self._stopLeeches()
+
+            if self._dc_estimator:
+                self._anchor_raw.append(self._assembleAnchorData(self._dc_estimator.raw))
+
+        except Exception as exp:
+            if not isinstance(exp, CancelledError):
+                logging.exception("Scanner sync acquisition of multiple detectors failed")
+
+            # make sure it's all stopped
+            for s, sub in zip(self._streams, self._subscribers):
+                s._dataflow.unsubscribe(sub)
+            self._df0.synchronizedOn(None)
+
+            if not isinstance(exp, CancelledError) and self._acq_state == CANCELLED:
+                # Reset data in case it was cancelled very late, to regain memory
+                self._raw = []
+                self._anchor_raw = []
+                logging.warning("Converting exception to cancellation")
+                raise CancelledError()
+
+            # If it wasn't finalized yet, finalize the data
+            if not self._raw:
+                try:
+                    # Process all the (intermediary) ._live_data to the right shape/format for the final ._raw
+                    for stream_idx, das in enumerate(self._live_data):
+                        if stream_idx == 0 and len(das) == 0:
+                            # It's OK to not have data for the SEM stream (e.g. Monochromator)
+                            continue
+                        self._assembleFinalData(stream_idx, das)
+                except Exception:
+                    logging.warning("Failed to assemble the final data after exception in stream %s", self.name.value)
+
+            if not self._raw:
+                # No data -> just make it look like a "complete" exception
+                raise exp
+
+            error = exp
+        finally:
+            self._current_scan_area = None  # Indicate we are done for the live (also in case of error)
+            for s in self._streams:
+                s._unlinkHwVAs()
+            self._restoreHardwareSettings()
+            self._emitter.scanPath.value = None  # disable vector scanning
+            self._acq_data = [[] for _ in self._streams]  # regain a bit of memory
+            self._live_data = [[] for _ in self._streams]
+            self._streams[0].raw = []
+            self._streams[0].image.value = None
+            self._dc_estimator = None
+            self._current_future = None
+            self._acq_done.set()
+
+        return self.raw, error
+
+
+
 
     def _updateImage(self):
         """

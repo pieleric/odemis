@@ -167,6 +167,19 @@
     },
 }
 
+"Sample Stage": {
+    class: simulated.Stage,
+    role: stage,
+    init: {
+        axes: ["x", "y"],
+        ranges: {"x": [-0.014, 0.014], "y": [-0.028, 0.028]},
+    },
+    properties: {
+        speed: {"x": 0.01, "y": 0.01}, # m/s
+    },
+    affects: ["SEM E-beam"],
+}
+
 # Depending exactly on the configuration, it might also be used for spectrometer
 "Camera": {
     class: andorcam2.AndorCam2,

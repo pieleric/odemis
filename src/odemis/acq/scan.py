@@ -98,9 +98,10 @@ def generate_scan_vector(scanner: model.HwComponent,
     scale = (pxs_fov[0] / pxs1_fov[0], pxs_fov[1] / pxs1_fov[1])  # ration between the pixel size of the scanner and the pixels scanned
     pxs1_m = scanner.pixelSize.value  # pixel size in m, at the current magnification
     trans_m = (translation[0] * pxs1_m[0], -translation[1] * pxs1_m[1])  # translation in m, Y is inverted in physical coordinates
+    trans_m = -trans_m[0], -trans_m[1]  # For historical reasons, the position correction is subtracted
     md_cor = {
         MD_PIXEL_SIZE_COR: scale,
-        MD_ROTATION_COR: rotation,
+        MD_ROTATION_COR: -rotation,  # For historical reasons, the rotation correction is subtracted
         MD_POS_COR: trans_m,
     }
     # TODO: the problem with computing MD_POS_COR now is that if the magnification is changed, then

@@ -2804,7 +2804,11 @@ class Scanner(model.Emitter):
                 self._on_setting_changed()
             return scan_path
 
-        if scan_path.ndim != 2 or scan_path.shape[1] != 2 or scan_path.shape[0] == 0:
+        if (not isinstance(scan_path, numpy.ndarray)
+            or scan_path.ndim != 2
+            or scan_path.shape[1] != 2
+            or scan_path.shape[0] == 0
+        ):
             raise ValueError(f"scanPath should be of shape (N, 2), but got {scan_path.shape}")
 
         # Check the scan path is within the limits of translation
@@ -2813,7 +2817,8 @@ class Scanner(model.Emitter):
         limits = self.translation.range
         if not (limits[0][0] <= min_x <= max_x <= limits[1][0] and
                 limits[0][1] <= min_y <= max_y <= limits[1][1]):
-            raise ValueError(f"scanPath {scan_path} is out of the limits {limits}")
+
+            raise ValueError(f"scanPath is bound in X by {min_x}->{max_x} and in Y by {min_y}->{max_y} is out of the limits {limits} px")
 
         self._on_setting_changed()
         return scan_path

@@ -1612,6 +1612,8 @@ class SPARC2TestCase(unittest.TestCase):
         # logging.debug("Acquisition took %g s", dur)
         # self.assertTrue(f.done())
         # self.assertEqual(len(data), len(sms.raw))
+        #
+        # return # DEBUG
 
         # Now, proper acquisition
         mcs.roi.value = (0, 0.2, 0.3, 0.6)

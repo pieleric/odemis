@@ -527,6 +527,28 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
         center_pos = self._emitter.getMetadata().get(MD_POS, (0, 0))
         return center_pos[0] + shift_lt_phys[0], center_pos[1] + shift_lt_phys[1]
 
+    def _getCenterPositionPhys(self) -> Tuple[float, float]:
+        """
+        Compute the center position of the RoA in physical coordinates (ie, corresponding
+        to the stage coordinates).
+        :return: theoretical position (x, y) of the center of the RoA in absolute coordinates (m, m)
+        """
+        roi = self.roi.value
+        center_roi = ((roi[0] + roi[2]) / 2, (roi[1] + roi[3]) / 2)
+
+        shape = self._emitter.shape
+        # convert into SEM translation coordinates: distance in px from center
+        shift_center_px = (shape[0] * (center_roi[0] - 0.5),
+                           shape[1] * (center_roi[1] - 0.5))
+
+        # Convert to physical coordinates
+        epxs = self._emitter.pixelSize.value  # scanner pxs at scale = 1
+        shift_center_phys = (shift_center_px[0] * epxs[0], -shift_center_px[1] * epxs[1])  # m (Y is inverted)
+
+        # Add current position (of the e-beam FoV center), to get an absolute position
+        center_fov = self._emitter.getMetadata().get(MD_POS, (0, 0))
+        return center_fov[0] + shift_center_phys[0], center_fov[1] + shift_center_phys[1]
+
     def _getScanStagePositions(self):
         """
         Compute the positions of the scan stage for each point in the ROI
@@ -928,7 +950,7 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
 
     def _assembleLiveData2D(self, n: int, raw_data: model.DataArray,
                             px_idx: Tuple[int, int], pos_lt: Tuple[float, float],
-                            rep: Tuple[int, int], pol_idx: int = 0):
+                            rep: Tuple[int, int], pol_idx: int = 0, pos_center: Tuple[float, float] = None):
         """
         This method is (currently solely) used for CL/Monochromator which means the tile_shape/"data which is
         scanned" can
@@ -941,6 +963,7 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
         :param pos_lt: position of the top-left pixel of raw_data in m: x, y.
         :param rep: repetition frame/ size of entire frame
         :param pol_idx: polarisation index related to name as defined in pos_polarizations variable
+        :param pos_center: used instead of pos_lt if that later one is None
         """
         if len(raw_data) == 0:
             return
@@ -952,7 +975,14 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
             # New polarization => new DataArray
             md = raw_data.metadata.copy()
             # TODO: take rotation into account
-            center, pxs = self._get_center_pxs(rep, (1, 1), self._pxs, pos_lt)
+            # => have a function that convert from center+shape+rotation to top-left pixel, and
+            # top-left+shape+rotation -> center?
+            # Or just get the theoretical center position at init.
+            if pos_lt is None:
+                pxs = self._pxs
+                center = pos_center
+            else:  # TODO: always use pos_center
+                center, pxs = self._get_center_pxs(rep, (1, 1), self._pxs, pos_lt)
             md.update({MD_POS: center,
                        MD_PIXEL_SIZE: pxs,
                        MD_DESCRIPTION: self._streams[n].name.value})
@@ -2490,6 +2520,7 @@ class SEMMDStream(MultipleDetectorStream):
             return self._runAcquisitionRectangle(future)
 
 
+    # FIXME: better name
     def _runAcquisitionRectangle(self, future) -> Tuple[List[model.DataArray], Optional[Exception]]:
         """
         Acquires images from the multiple detectors via software synchronisation.
@@ -2762,12 +2793,7 @@ class SEMMDStream(MultipleDetectorStream):
         error = None
         try:
             self._acq_done.clear()
-            # TODO: the real dwell time used depends on how many detectors are used, and so it can
-            # only be known once we start acquiring. One way would be to set a synchronization, and
-            # then subscribe all the detectors, and finally check the dwell time.
             px_time = self._adjustHardwareSettings()
-            # spot_pos = self._getSpotPositions()
-            # pos_flat = spot_pos.reshape((-1, 2))  # X/Y together (X iterates first)
 
             rep = tuple(self.repetition.value)
             roi = self.roi.value
@@ -2794,7 +2820,8 @@ class SEMMDStream(MultipleDetectorStream):
 
             tot_num = numpy.prod(rep)
 
-            pos_lt = self._getLeftTopPositionPhys()  # FIXME: handle rotation (and change to use the center of the RoA?)
+            #pos_lt = self._getLeftTopPositionPhys()  # FIXME: handle rotation (and change to use the center of the RoA?)
+            pos_center = self._getCenterPositionPhys()  # Independent of rotation
             self._pxs = self._getPixelSize()
             self._scanner_pxs = self._emitter.pixelSize.value  # sub-pixel size
 
@@ -2830,13 +2857,12 @@ class SEMMDStream(MultipleDetectorStream):
                             logging.debug("Set resolution of independent detector %s to %s",
                                           det.name, (n_x, n_y))
 
-                # Take the points from the full scan vector that needs to be scan in this iteration
-                # need to skip the margin, if less than 1 line.
-                if n_y == 1:  # single line, or smaller => no need to use the margin
+                # Pick the points from the full scan vector that needs to be scanned in this iteration
+                if n_y == 1:  # single line, or smaller => no flyback => no need to use the margin
                     next_px_flat = margin + px_idx[0] + px_idx[1] * (rep[0] + margin)
                     scan_vector = pos_flat[next_px_flat:next_px_flat + npixels2scan]
                     scan_margin = 0
-                else:  # multiple lines, so we can use the margin
+                else:  # multiple lines, so we should keep the margin
                     scan_vector_len = npixels2scan + margin * n_y
                     next_px_flat = px_idx[0] + px_idx[1] * (rep[0] + margin)
                     scan_vector = pos_flat[next_px_flat:next_px_flat + scan_vector_len]
@@ -2845,12 +2871,20 @@ class SEMMDStream(MultipleDetectorStream):
                 # Compensate for the drift
                 if self._dc_estimator:
                     tot_drift = self._dc_estimator.tot_drift
-                    # TODO: check the margin and limit the drift in case it'd go out of the margin
-                    clipped_drift = tot_drift
-                    scan_vector -= clipped_drift  # TODO: test
-                    logging.error("Drift of %s px caused acquisition region out "
-                                  "of bounds: limited to %s px",
-                                  tot_drift, clipped_drift)
+
+                    # Check the margin
+                    min_x, min_y = numpy.min(scan_vector, axis=0)
+                    max_x, max_y = numpy.max(scan_vector, axis=0)
+                    limits = self._emitter.translation.range
+                    drift_range = ((limits[0][0] - min_x, limits[1][0] - max_x),  # neg -> pos
+                                   (limits[0][1] - min_y, limits[1][1] - max_y))
+                    clipped_drift = (min(max(drift_range[0][0], tot_drift[0]), drift_range[0][1]),
+                                     min(max(drift_range[1][0], tot_drift[1]), drift_range[1][1]))
+                    scan_vector -= clipped_drift
+                    if tot_drift != clipped_drift:
+                        logging.error("Drift of %s px caused acquisition region out "
+                                      "of bounds %s: limited to %s px",
+                                      tot_drift, drift_range, clipped_drift)
 
                 self._emitter.scanPath.value = scan_vector
 
@@ -2875,8 +2909,8 @@ class SEMMDStream(MultipleDetectorStream):
                 # Time to scan a frame
                 frame_time = px_time * npixels2scan
 
-                px_pos = (pos_lt[0] + px_idx[1] * self._pxs[0],
-                          pos_lt[1] - px_idx[0] * self._pxs[1])  # Y is inverted
+                # px_pos = (pos_lt[0] + px_idx[1] * self._pxs[0],
+                #           pos_lt[1] - px_idx[0] * self._pxs[1])  # Y is inverted
 
                 # Wait for all the Dataflows to return the data. As all the
                 # detectors are linked together to the e-beam, they should all
@@ -2901,7 +2935,7 @@ class SEMMDStream(MultipleDetectorStream):
 
                     raw_da = scan.vector_data_to_img(last_da, (n_x, n_y), scan_margin, md_cor)
                     raw_da = self._preprocessData(i, raw_da, px_idx)
-                    self._assembleLiveData2D(i, raw_da, px_idx, px_pos, rep, 0)
+                    self._assembleLiveData2D(i, raw_da, px_idx, None, rep, 0, pos_center)
 
                 self._shouldUpdateImage()
 
@@ -3015,9 +3049,6 @@ class SEMMDStream(MultipleDetectorStream):
             self._acq_done.set()
 
         return self.raw, error
-
-
-
 
     def _updateImage(self):
         """

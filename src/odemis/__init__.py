@@ -73,10 +73,14 @@ def _get_version():
             # Last attempt: see if there is a version file
             import sys
             if getattr(sys, 'frozen', False):
-                path = os.path.join(os.path.dirname(sys.executable), 'version.txt')
-                if os.path.exists(path):
-                    with open(path, 'r') as f:
-                        return f.readline().strip()
+                exe_path = os.path.dirname(sys.executable)
+                # Old versions of pyinstaller put everything in the same directory, and newer versions
+                # place it in "_internal" subdirectory.
+                for subdir in ("", "_internal"):
+                    path = os.path.join(exe_path, subdir, 'version.txt')
+                    if os.path.exists(path):
+                        with open(path, 'r') as f:
+                            return f.readline().strip()
 
             logging.warning("Unable to find the actual version")
             return "Unknown"

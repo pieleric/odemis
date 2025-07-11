@@ -1690,6 +1690,104 @@ class SPARC2TestCase(unittest.TestCase):
         numpy.testing.assert_allclose(cl_md[model.MD_PIXEL_SIZE], exp_pxs)
         self.assertEqual(cl_md[model.MD_USER_TINT], (255, 0, 0))  # from .tint
 
+    def test_acq_cl_rotated(self):
+        """
+        Test short & long acquisition for SEM MD CL intensity with rotation
+        """
+        # create axes
+        axes = {"filter": ("band", self.filter)}
+
+        # Create the stream
+        sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam,
+                                emtvas={"dwellTime", "scale", "magnification", "pixelSize"})
+        mcs = stream.CLSettingsStream("test",
+                                      self.cl, self.cl.data, self.ebeam,
+                                      axis_map=axes,
+                                      emtvas={"dwellTime", })
+        sms = stream.SEMMDStream("test sem-md", [sems, mcs])
+
+        # Now, proper acquisition
+        mcs.roi.value = (0.25, 0.2, 0.55, 0.6)
+        exp_rot = math.radians(10)
+        mcs.rotation.value = exp_rot
+
+        # dwell time of sems shouldn't matter
+        mcs.emtDwellTime.value = 1e-6  # s
+
+        mcs.repetition.value = (500, 700)
+        exp_pos, exp_pxs, exp_res = roi_to_phys(mcs)
+
+        # Start acquisition
+        timeout = 1 + 1.5 * sms.estimateAcquisitionTime()
+        start = time.time()
+        f = sms.acquire()
+
+        # wait until it's over
+        data, exp = f.result(timeout)
+        dur = time.time() - start
+        logging.debug("Acquisition took %g s", dur)
+        self.assertTrue(f.done())
+        self.assertIsNone(exp)
+        self.assertEqual(len(data), len(sms.raw))
+
+        # Both SEM and CL should have the same shape
+        self.assertEqual(len(sms.raw), 2)
+        self.assertEqual(sms.raw[0].shape, exp_res[::-1])
+        self.assertEqual(sms.raw[1].shape, exp_res[::-1])
+        sem_md = sms.raw[0].metadata
+        cl_md = sms.raw[1].metadata
+        numpy.testing.assert_allclose(sem_md[model.MD_POS], cl_md[model.MD_POS])
+        numpy.testing.assert_allclose(sem_md[model.MD_PIXEL_SIZE], cl_md[model.MD_PIXEL_SIZE])
+        numpy.testing.assert_allclose(sem_md[model.MD_ROTATION], cl_md[model.MD_ROTATION])
+        numpy.testing.assert_allclose(cl_md[model.MD_POS], exp_pos)
+        numpy.testing.assert_allclose(cl_md[model.MD_PIXEL_SIZE], exp_pxs)
+        numpy.testing.assert_allclose(cl_md[model.MD_ROTATION], exp_rot)
+        self.assertEqual(mcs.axisFilter.value, self.filter.position.value["band"])
+
+        # Now same thing but with more pixels and drift correction
+        mcs.roi.value = (0.3, 0.15, 0.9, 0.85)
+        mcs.rotation.value = exp_rot
+        mcs.tint.value = (255, 0, 0)  # Red colour
+        dc = leech.AnchorDriftCorrector(self.ebeam, self.sed)
+        dc.period.value = 1
+        dc.roi.value = (0.525, 0.525, 0.6, 0.6)
+        dc.dwellTime.value = 1e-06
+        sems.leeches.append(dc)
+
+        mcs.repetition.value = (3000, 3500)
+        b0, b1 = list(mcs.axisFilter.choices)[:2]
+        mcs.axisFilter.value = b0
+        exp_pos, exp_pxs, exp_res = roi_to_phys(mcs)
+
+        # Start acquisition
+        timeout = 1 + 2.5 * sms.estimateAcquisitionTime()
+        start = time.time()
+        dc.series_start()
+        f = sms.acquire()
+
+        # wait until it's over
+        data, exp = f.result(timeout)
+        dc.series_complete(data)
+        dur = time.time() - start
+        logging.debug("Acquisition took %g s", dur)
+        self.assertTrue(f.done())
+        self.assertIsNone(exp)
+        self.assertEqual(len(data), len(sms.raw))
+        # Both SEM and CL should have the same shape (and last one is anchor region)
+        self.assertEqual(len(sms.raw), 3)
+        self.assertEqual(sms.raw[0].shape, exp_res[::-1])
+        self.assertEqual(sms.raw[1].shape, exp_res[::-1])
+        self.assertEqual(mcs.axisFilter.value, self.filter.position.value["band"])
+        sem_md = sms.raw[0].metadata
+        cl_md = sms.raw[1].metadata
+        numpy.testing.assert_allclose(sem_md[model.MD_POS], cl_md[model.MD_POS])
+        numpy.testing.assert_allclose(sem_md[model.MD_PIXEL_SIZE], cl_md[model.MD_PIXEL_SIZE])
+        numpy.testing.assert_allclose(sem_md[model.MD_ROTATION], cl_md[model.MD_ROTATION])
+        numpy.testing.assert_allclose(cl_md[model.MD_POS], exp_pos)
+        numpy.testing.assert_allclose(cl_md[model.MD_PIXEL_SIZE], exp_pxs)
+        numpy.testing.assert_allclose(cl_md[model.MD_ROTATION], exp_rot)
+        self.assertEqual(cl_md[model.MD_USER_TINT], (255, 0, 0))  # from .tint
+
     def test_acq_cl_cancel(self):
         """
         Test cancelling acquisition for SEM MD CL intensity

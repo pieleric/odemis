@@ -126,6 +126,8 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
                 logging.debug("Using ROA from %s", s)
                 self.repetition = s.repetition
                 self.roi = s.roi
+                if model.hasVA(s, "rotation"):
+                    self.rotation = s.rotation
                 if model.hasVA(s, "fuzzing"):
                     self.fuzzing = s.fuzzing
                 break
@@ -2797,7 +2799,8 @@ class SEMMDStream(MultipleDetectorStream):
 
             rep = tuple(self.repetition.value)
             roi = self.roi.value
-            pos_flat, margin, md_cor = scan.generate_scan_vector(self._emitter, rep, roi, rotation=0, dwell_time=px_time)
+            rotation = self.rotation.value
+            pos_flat, margin, md_cor = scan.generate_scan_vector(self._emitter, rep, roi, rotation, dwell_time=px_time)
             # Drop center metadata so that we don't use it by mistake when acquiring a sub-region.
             # It's computed separately using the top-left position.
             del md_cor[model.MD_POS_COR]

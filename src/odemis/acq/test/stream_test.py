@@ -934,19 +934,9 @@ class SPARCTestCase(unittest.TestCase):
     """
     Tests to be run with a (simulated) SPARC
     """
-    backend_was_running = False
-
     @classmethod
     def setUpClass(cls):
-        try:
-            testing.start_backend(SPARC_CONFIG)
-        except LookupError:
-            logging.info("A running backend is already found, skipping tests")
-            cls.backend_was_running = True
-            return
-        except IOError as exp:
-            logging.error(str(exp))
-            raise
+        testing.start_backend(SPARC_CONFIG)
 
         # Find CCD & SEM components
         cls.ccd = model.getComponent(role="ccd")
@@ -955,16 +945,6 @@ class SPARCTestCase(unittest.TestCase):
         cls.sed = model.getComponent(role="se-detector")
         cls.mnchr = model.getComponent(role="monochromator")
         cls.spgp = model.getComponent(role="spectrograph")
-
-    @classmethod
-    def tearDownClass(cls):
-        if cls.backend_was_running:
-            return
-        testing.stop_backend()
-
-    def setUp(self):
-        if self.backend_was_running:
-            self.skipTest("Running backend found")
 
     def _roiToPhys(self, repst):
         """
@@ -1560,7 +1540,7 @@ class SPARC2TestCase(unittest.TestCase):
     """
     @classmethod
     def setUpClass(cls):
-        testing.start_backend(SPARC2_HWSYNC_CONFIG)  #DEBUG
+        testing.start_backend(SPARC2_CONFIG)  #DEBUG
 
         # Find CCD & SEM components
         cls.ccd = model.getComponent(role="ccd")
@@ -1570,7 +1550,7 @@ class SPARC2TestCase(unittest.TestCase):
         cls.cl = model.getComponent(role="cl-detector")
         cls.spgp = model.getComponent(role="spectrograph")
         cls.stage = model.getComponent(role="stage")
-        # cls.sstage = model.getComponent(role="scan-stage")  #DEBUG
+        cls.sstage = model.getComponent(role="scan-stage")  #DEBUG
         cls.filter = model.getComponent(role="cl-filter")
 
     def test_acq_cl(self):

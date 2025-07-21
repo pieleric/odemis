@@ -41,7 +41,7 @@ import odemis.util.driver as udriver
 from odemis import model
 from odemis.acq import drift, scan
 from odemis.acq import leech
-from odemis.acq.leech import AnchorDriftCorrector
+from odemis.acq.leech import AnchorDriftCorrector, LeechAcquirer
 from odemis.acq.stream._live import LiveStream
 from odemis.model import MD_POS, MD_DESCRIPTION, MD_PIXEL_SIZE, MD_ACQ_DATE, MD_AD_LIST, \
     MD_DWELL_TIME, MD_EXP_TIME, MD_DIMS, MD_THETA_LIST, MD_WL_LIST, MD_ROTATION, \
@@ -242,7 +242,7 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
         return r
 
     @property
-    def leeches(self):
+    def leeches(self) -> Tuple[LeechAcquirer]:
         """
         return (tuple of Leech): leeches to be used during acquisition
         """
@@ -670,13 +670,6 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
         i (int, int): pixel index of the first (top-left) pixel (Y, X)
         return (value): value as needed by _onCompletedData/_assembleLiveData
         """
-        # Update metadata based on user settings
-        s = self._streams[n]
-        if hasattr(s, "tint"):
-            try:
-                data.metadata[model.MD_USER_TINT] = img.tint_to_md_format(s.tint.value)
-            except ValueError as ex:
-                logging.warning("Failed to store user tint for stream %s: %s", s.name.value, ex)
 
         return data
 
@@ -895,21 +888,32 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
         for l in self.leeches:
             l.complete(self.raw)
 
+    def _store_tint(self, n, raw_data):
+        # Update metadata based on user settings
+        s = self._streams[n]
+        if hasattr(s, "tint"):
+            try:
+                raw_data.metadata[model.MD_USER_TINT] = img.tint_to_md_format(s.tint.value)
+            except ValueError as ex:
+                logging.warning("Failed to store user tint for stream %s: %s", s.name.value, ex)
+
     def _assembleLiveData(self, n: int, raw_data: model.DataArray,
                           px_idx: Tuple[int, int], px_pos: Tuple[float, float],
                           rep: Tuple[int, int], pol_idx: int = 0, pos_center: Tuple[float, float] = None):
         """
-         Update the ._live_data structure with the last acquired data. So that it is suitable to display in the
-         live update overlay and can be converted by _assembleFinalData into the final ._raw.
-         :param n: number of current stream
-         :param raw_data: acquired data of SEM stream
-         :param px_idx: pixel index: y, x
-         :param px_pos: position of center of data in m: x, y
-         :param rep: size of entire data being assembled (aka repetition) in pixels: x, y
-         :param pol_idx: polarisation index related to name as defined in pos_polarizations variable
-         (0 if no polarisation)
-         :param pos_center: physical position of the center of the complete RoA in m.
-         """
+        Update the ._live_data structure with the last acquired data. So that it is suitable to display in the
+        live update overlay and can be converted by _assembleFinalData into the final ._raw.
+        :param n: number of current stream
+        :param raw_data: acquired data of SEM stream
+        :param px_idx: pixel index: y, x
+        :param px_pos: position of center of data in m: x, y
+        :param rep: size of entire data being assembled (aka repetition) in pixels: x, y
+        :param pol_idx: polarisation index related to name as defined in pos_polarizations variable
+        (0 if no polarisation)
+        :param pos_center: physical position of the center of the complete RoA in m.
+        """
+        # TODO: check it works here too.
+        self._store_tint(n, raw_data)
         return self._assembleLiveDataTiles(n, raw_data, px_idx, px_pos, rep, pol_idx, pos_center)
 
     def _assembleLiveDataTiles(self, n: int, raw_data: model.DataArray,
@@ -937,8 +941,11 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
             assert px_idx == (0, 0)  # We expect that the first pixel is always the top left pixel
             # New polarization => new DataArray
             md = raw_data.metadata.copy()
-            center, pxs = self._get_center_pxs(rep, tile_shape[::-1], self._pxs, px_pos) # FIXME: use center??
-            md.update({MD_POS: center,
+            # pxs: in the fuzzing acquisition, that's what we call "sub-pixel size"
+            pxs = self._pxs[0] / tile_shape[1], self._pxs[1] / tile_shape[0]  # tile_shape is Y,X
+            # TODO: shouldn't the pixel
+            #center, pxs = self._get_center_pxs(rep, tile_shape[::-1], self._pxs, px_pos) # FIXME: use center??
+            md.update({MD_POS: pos_center,
                        MD_PIXEL_SIZE: pxs,
                        MD_DESCRIPTION: self._streams[n].name.value})
             da = model.DataArray(numpy.zeros(shape=rep[::-1] * numpy.array(tile_shape), dtype=raw_data.dtype), md)
@@ -968,6 +975,9 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
         :param pol_idx: polarisation index related to name as defined in pos_polarizations variable
         :param pos_center: used instead of pos_lt if that later one is None
         """
+        # TODO: check it works here too.
+        self._store_tint(n, raw_data)
+
         if len(raw_data) == 0:
             return
 
@@ -1012,15 +1022,10 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
             # The data has been acquired and stored in several steps
             # => integrate into a single final image
             # (typically happens for the SEM image, with multiple polarizations)
-            md = data[-1].metadata
-            if MD_DWELL_TIME in md:
-                md[model.MD_DWELL_TIME] *= len(data)  # total time ebeam stayed on same pixel/position
-            if MD_EXP_TIME in md:
-                md[model.MD_EXP_TIME] *= len(data)
-            md[model.MD_INTEGRATION_COUNT] = md.get(model.MD_INTEGRATION_COUNT, 1) * len(data)
-
-            self._raw.append(model.DataArray(
-                                 numpy.mean(data, axis=0).astype(data[0].dtype), md))
+            integrator = img.ImageIntegrator(len(data))
+            for d in data:
+                data_int = integrator.append(d)
+            self._raw.append(data_int)
         else:  # No data at all
             logging.warning("No final data for stream %s/%d", self.name.value, n)
 
@@ -1330,7 +1335,281 @@ class SEMCCDMDStream(MultipleDetectorStream):
             if model.hasVA(self._emitter, "scanPath"):
                 return self._runAcquisitionEbeamVector(future)
             else:
-                return self._runAcquisitionEbeamRectangle(future)
+                acquirer = SEMCCDAcquirer(self)
+                return self._genericRunAcquisition(future, acquirer)
+                #return self._runAcquisitionEbeamRectangle(future)
+
+    def _reset_live_data(self):
+        self._live_data = [[] for _ in self._streams]
+        self._raw = []
+        self._anchor_raw = []
+        self._current_scan_area = (0, 0, 0, 0)
+
+    def _get_polarisation_positions(self) -> List[Optional[float]]:
+        # if no polarimetry hardware present => no position / 0 s
+        if not self._analyzer:
+            return [None]  #s
+
+        # check if polarization VA exists, overwrite list of polarization value
+        if self._acquireAllPol.value:
+            pos_polarizations = POL_POSITIONS
+            logging.debug("Will acquire the following polarization positions: %s",
+                          list(pos_polarizations))
+        else:
+            pos_polarizations = [self._polarization.value]
+            logging.debug("Will acquire the following polarization position: %s",
+                          pos_polarizations)
+        # extra time to move pol analyzer for each pos requested (value is very approximate)
+        time_move_pol = POL_MOVE_TIME * len(pos_polarizations)
+        logging.debug("Add %s extra sec to move polarization analyzer for all positions requested."
+                      % time_move_pol)
+
+        self._time_move_pol_left = time_move_pol
+
+        return pos_polarizations
+
+    def _select_polarization(self, pol_pos: Optional[float]) -> float:
+        """
+
+        :param pol_pos:
+        :return: estimated time that will be still required to move the polarization analyzer
+        for the rest of the acquisition
+        """
+        if pol_pos is None:
+            return 0
+
+        logging.debug("Acquiring with the polarization position %s", pol_pos)
+        # move polarization analyzer to position specified
+        self._analyzer.moveAbsSync({"pol": pol_pos})
+        self._time_move_pol_left -= POL_MOVE_TIME
+        return self._time_move_pol_left
+
+    def _get_min_leech_period(self) -> Optional[float]:
+        """
+        :return: the shortest period of all the leeches
+        """
+        if not self.leeches:
+            return None
+
+        return min(l.period.value for l in self.leeches)
+
+    def _prepare_leeches(self, snapshot_time, tot_num, pos_polarizations, rep, integration_count) -> float:
+        # Initialize leeches: Shape should be slowest axis to fastest axis
+        # (pol pos, rep y, rep x, images to integrate).
+        # Polarization analyzer pos is slowest and image integration fastest.
+        # Estimate acq time for leeches is based on two fastest axis.
+        if integration_count > 1:
+            shape = (len(pos_polarizations), rep[1], rep[0], integration_count)
+        else:
+            shape = (len(pos_polarizations), rep[1], rep[0])
+
+        self._leech_n_img, leech_time_p_snap = self._startLeeches(snapshot_time, tot_num, shape)
+        return leech_time_p_snap
+
+    def _run_leeches(self, acquirer):
+        # Check if it's time to run a leech
+        for li, l in enumerate(self.leeches):
+            if self._leech_n_img[li] is None:
+                continue
+            self._leech_n_img[li] -= 1
+            if self._leech_n_img[li] == 0:
+                try:
+                    # Temporarily switch the CCD to a different event trigger, so that it
+                    # doesn't get triggered while the leech is running (because it could use the
+                    # e-beam, which would send a startScan event)
+                    acquirer.pause_pixel_acquisition()
+
+                    nimg = l.next([d[-1] for d in self._acq_data])
+                    logging.debug(
+                        "Ran leech %s successfully. Will run next leech after %s acquisitions.", l,
+                        nimg)
+                except Exception:
+                    logging.exception("Leech %s failed, will retry next image", l)
+                    nimg = 1  # try again next pixel
+                self._leech_n_img[li] = nimg
+                if self._acq_state == CANCELLED:
+                    raise CancelledError()
+
+                acquirer.resume_pixel_acquisition()
+
+    def _update_live_area(self, px_idx, tile_size):
+        # Updates the region being acquired, in the SEM image coordinates (in pixel).
+        self._current_scan_area = (px_idx[1] * tile_size[0],
+                                   px_idx[0] * tile_size[1],
+                                   (px_idx[1] + 1) * tile_size[0] - 1,
+                                   (px_idx[0] + 1) * tile_size[1] - 1)
+
+    def _update_live_pixel(self, integration_count: int):
+        # Live update the setting stream with the new data
+        # When there is integration, we always pass the data, as
+        # the number of images received matters.
+        if integration_count > 1 or time.time() > self._last_ccd_update + self._live_update_period:
+            try:
+                self._sccd._onNewData(self._ccd_df, self._acq_data[self._ccd_idx][-1])
+            except Exception:
+                logging.exception("Failed to update CCD live view")
+            self._last_ccd_update = time.time()
+
+    def _integrate_snapshot(self, integration_count: int):
+        # integrate the acquired images one after another
+        for stream_idx, das in enumerate(self._acq_data):
+            if self._img_intor[stream_idx] is None:
+                self._img_intor[stream_idx] = img.ImageIntegrator(integration_count)
+            self._acq_data[stream_idx] = [self._img_intor[stream_idx].append(das[-1])]
+
+    def _assemble_final_data_all_streams(self):
+        # Process all the (intermediary) ._live_data to the right shape/format for the final ._raw
+        for stream_idx, das in enumerate(self._live_data):
+            self._assembleFinalData(stream_idx, das)
+
+    def _check_cancelled(self):
+        if self._acq_state == CANCELLED:
+            raise CancelledError()
+
+    def _genericRunAcquisition(self, future, acquirer)-> Tuple[List[model.DataArray], Optional[Exception]]:
+        # For each polarization,
+        #   Acquire one spatial acquisition, containing all the e-beam positions
+        #   For each e-beam position,
+        #      acquire one pixel acquisition, containing multiple pixel snapshots (exposure)
+
+        error = None
+        self._acq_done.clear()
+        try:
+            pos_polarizations = self._get_polarisation_positions()
+            shortest_leech_period = self._get_min_leech_period()
+
+            # Prepare the hardware (different per acquisition type)
+            acquirer.prepare_hardware(shortest_leech_period)
+
+            # Compute the SEM tile size
+            acquirer.prepare_acquisition()
+            self._pxs = acquirer.pxs  # Used by some of the data assembling functions
+
+            self._reset_live_data()
+
+            rep = self.repetition.value
+            tot_num = int(numpy.prod(rep)) * acquirer.integration_count * len(pos_polarizations)  # total number of images to acquire
+            # tot number of ebeam pos to acquire taking the number of images per ebeam pos into account
+
+            # NOTE: for hwsync: no leech (ie, 0), and no integration count (ie, 1)
+            # (though, if using a vector scan, integration count would be much easier to handle,
+            # by just duplicating the pixel positions in the scanPath, but anyway, we are not in a rush
+            # then!)
+
+            # Prepare the leeches => global
+            leech_time_p_snapshot = self._prepare_leeches(acquirer.snapshot_time, tot_num,
+                                                          pos_polarizations, rep,
+                                                          acquirer.integration_count)
+
+            self._last_ccd_update = 0  # TODO: move to _prepare_live_pixel()?
+            # Iterate for the polarisations
+            start_t = time.time()
+            n = 0  # number of images acquired so far
+            for pol_idx, pol_pos in enumerate(pos_polarizations):
+                # Move to the polarisation position
+                time_move_pol_left = self._select_polarization(pol_pos)
+
+                # NOTE: for hwsync: start the e-beam scan
+                acquirer.start_spatial_acquisition(pol_idx)
+
+                # iterate over pixel positions for scanning.
+                for px_idx in numpy.ndindex(*rep[::-1]):  # last dim (X) iterates first
+                    self._acq_data = [[] for _ in self._streams]  # TODO: move inside start_pixel_acquisition()?
+
+                    # Prepare integrator => global
+                    # In case of long integration time, one ImageIntegrator per stream
+                    self._img_intor = [None for _ in self._streams]
+
+                    px_pos = acquirer.start_pixel_acquisition(px_idx)
+
+                    # Update the SEM update location => global
+                    self._update_live_area(px_idx, acquirer.tile_size)
+
+                    # Iterate over the integration time
+                    for i in range(acquirer.integration_count):
+                        start_int = time.time()
+
+                        # Acquire the image
+                        # NOTE: for hwsync, this is just about retrieving the image
+                        acquirer.acquire_one_snapshot(n, px_idx)
+                        self._check_cancelled()
+                        self._integrate_snapshot(acquirer.integration_count)
+                        dur_int = time.time() - start_int
+                        # time left for leeches
+                        leech_time_left = (tot_num - n + 1) * leech_time_p_snapshot
+                        # extra time needed taking leeches into account and moving polarizer HW if present
+                        extra_time = leech_time_left + time_move_pol_left
+                        self._updateProgress(future, dur_int, n + 1, tot_num, extra_time)
+                        self._update_live_pixel(acquirer.integration_count)
+                        self._run_leeches(acquirer)
+                        n += 1  # number of images acquired so far
+
+                    # TODO: separate the _acq_data which corresponds to the snapshort just received
+                    # (can be returned by acquire_one_snapshot), from the _acq_data which is the
+                    # integrated data, and eventually will be stored in the live_data (at the end
+                    # of the pixel acquisition).
+
+                    # All the data for this pixel has been acquired => store it in the "live data".
+                    # Live data = data is the same shape as the final data, but not yet completely acquired.
+                    for s_idx, das in enumerate(self._acq_data):
+                        self._assembleLiveData(s_idx, das[-1], px_idx, px_pos, rep, pol_idx, acquirer.pos_center)
+
+                    # Activate _updateImage thread
+                    self._shouldUpdateImage()
+                    logging.debug("Done acquiring image number %s out of %s.", n, tot_num)
+
+            # Stop the acquisition
+            dur = time.time() - start_t
+            logging.info("Acquisition completed in %g s -> %g s/frame", dur, dur / n)
+
+            acquirer.terminate_acquisition()
+            self._stopLeeches()
+
+            # Save all the data
+            self._assemble_final_data_all_streams()
+
+            if self._dc_estimator:
+                self._anchor_raw.append(self._assembleAnchorData(self._dc_estimator.raw))
+
+            with self._acq_lock:
+                self._check_cancelled()
+                self._acq_state = FINISHED
+        except Exception as exp:
+            acquirer.terminate_acquisition()
+            if not isinstance(exp, CancelledError):
+                if self._acq_state == CANCELLED:
+                    # make sure the exception is a CancelledError
+                    exp = CancelledError()
+                else:
+                    logging.exception("Software sync acquisition of multiple detectors failed")
+
+            # If it wasn't finalized yet, finalize the data
+            if not self._raw:
+                try:
+                    self._assemble_final_data_all_streams()
+                except Exception:
+                    logging.warning("Failed to assemble the final data after exception in stream %s", self.name.value)
+
+            error = exp
+        finally:
+            # Stop the acquisition for safety and clean up
+            acquirer.terminate_acquisition()
+            # Restore hardware settings
+            for s in self._streams:
+                s._unlinkHwVAs()
+            acquirer.restore_hardware()
+
+            self._dc_estimator = None
+            self._current_future = None
+            self._acq_data = []  # regain a bit of memory
+            self._acq_done.set()
+            # Only after this flag, as it's used by the im_thread too
+            self._live_data = [[] for _ in self._streams]  # FIXME: can be put an empty list?
+            self._streams[0].raw = []
+            self._streams[0].image.value = None
+            self._img_intor = []
+
+        return self.raw, error
 
     def _adjustHardwareSettingsHwSync(self) -> Tuple[float, int]:
         """
@@ -2207,14 +2486,12 @@ class SEMCCDMDStream(MultipleDetectorStream):
         return self.raw, error
 
 
-    def _waitForImage(self, img_time):
+    def _waitForImage(self, img_time: float) -> bool:
         """
         Wait for the detector to acquire the image.
-        :param det_idx (int): Index of detector-stream in streams.
         :param img_time (0<float): Estimated time spend for one image to be acquired.
         :return (bool): True if acquisition timed out.
         """
-
         # A big timeout in the wait can cause up to 50 ms latency.
         # => after waiting the expected time only do small waits
 
@@ -3375,7 +3652,8 @@ class SEMSpectrumMDStream(SEMCCDMDStream):
     image).
     """
 
-    def _assembleLiveData(self, n, raw_data, px_idx, px_pos, rep, pol_idx=0):
+    def _assembleLiveData(self, n, raw_data, px_idx, px_pos,
+                          rep: Tuple[int, int], pol_idx: int = 0, pos_center: Tuple[float, float] = None):
         """
          :param n: number of current stream
          :param raw_data: acquired data for the specified stream
@@ -3387,7 +3665,7 @@ class SEMSpectrumMDStream(SEMCCDMDStream):
          live update overlay and can be converted by _assembleFinalData into the final ._raw.
          """
         if n != self._ccd_idx:
-            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx)
+            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx, pos_center)
 
         spec_shape = raw_data.shape
 
@@ -3396,7 +3674,9 @@ class SEMSpectrumMDStream(SEMCCDMDStream):
             # New polarization => new DataArray
             md = raw_data.metadata.copy()
             # Compute metadata to match the SEM metadata
-            center, pxs = self._get_center_pxs(rep, (1, 1), self._pxs, px_pos)
+            #center, pxs = self._get_center_pxs(rep, (1, 1), self._pxs, px_pos)
+            pxs = self._pxs
+            center = pos_center
             md.update({MD_POS: center,
                        MD_PIXEL_SIZE: pxs,
                        MD_DIMS: "CTZYX",
@@ -4409,3 +4689,350 @@ class ScannedRemoteTCStream(LiveStream):
 
     def estimateAcquisitionTime(self):
         return self._dwellTime.value * numpy.prod(self.repetition.value) * 1.2 + 1.0
+
+
+class SEMCCDAcquirer:
+    """
+    Acquirer for SEM CCD detectors, which can be used to acquire images using the e-beam to scan,
+    without support for rotation. It supports fuzzing, leeches, and pixel integration.
+
+    Note on vocabulary:
+    * polarization: the polarization filter settings using for the spatial acquisition.
+    * spatial acquisition: the acquisition of an image along X&Y on the sample, by scanning the sample
+      typically either by moving the e-beam or moving the (scan) stage. Each pixel of this acquisition
+      corresponds to the acquisition by the light detector (eg, spectrum or AR).
+    * pixel acquisition: the (total) acquisition of the light corresponding to one position on the
+      sample. It corresponds to one or more light detector "snapshots". Moreover, each pixel
+      can correspond to a tile in the SEM scan (when fuzzing is used).
+    * snapshot acquisition: a single acquisition of the light detector at a given position on the sample.
+      It might be "integrated" (ie, summed) to generate a complete "pixel acquisition".
+    * sub-pixel: when fuzzing is activated, the e-beam scans a whole area corresponding to a given
+      pixel area. This scan generates a "tile" of the SEM image, where each pixel is called a "sub-pixel".
+    * leech: a separate "side" acquisition that is run from time to time during the whole spatial
+      acquisition. The most typical leech is the drift correction, which compensate of the shift
+      in X/Y over time.
+    """
+
+    def __init__(self, mdstream: SEMCCDMDStream):
+        """
+        :param mdstream: (SEMCCDMDStream) the stream to acquire from
+        """
+        self._mdstream = mdstream
+
+        # Values to be initialized when calling prepare_hardware()
+        self.integration_count = 1  # number of snapshot acquisitions to do per pixel
+        self.snapshot_time = 0.0  # time in s for one snapshot acquisition
+        self.sem_time = 0.0  # time in s for one SEM acquisition during a snapshot (equal or shorter to the snapshot time)
+
+        # TODO: remove from md_stream
+        # original values of the hardware VAs to be restored after acquisition
+        self._orig_hw_values: Dict[model.VigilantAttribute, Any] = {}  # VA -> original value
+
+        self.pxs = self._mdstream._getPixelSize() # physical size a whole pixel in m (X,Y)
+        self._rep = self._mdstream.repetition.value # number of pixels in the spatial image (of the CL data)
+        self.tile_size = None  # number of sub-pixels in the SEM spatial image (X,Y) (= 1,1 if no fuzzing)
+
+        # the coordinates (X,Y) of each point scanned (2D index) in px relative to the center of the FoV
+        self._spot_pos = None  # numpy array  (Y,X,2)
+        self.pos_center = None  # position of the center of the spatial acquisition in physical coordinates in m (X,Y)
+
+
+    def prepare_hardware(self, max_snapshot_duration: Optional[float] = None) -> None:
+        """
+        :param max_snapshot_duration: maximum exposure time for a single CCD image. If the
+        requested exposure time is longer, it will be divided into multiple snapshots.
+        This can be used when a leech period is short, to run in within a single pixel acquisition.
+        :side effects: updates .snapshot_time and .integration_count
+        """
+        # Note: if the stream has "local VA" (ie, copy of the component VA), then it is assumed that
+        # the component VA has already been set to the correct value. (ie, linkHwVAs() has been called)
+
+        if self._mdstream._integrationTime:
+            integration_time = self._mdstream._integrationTime.value
+            exp_time = self._mdstream._ccd.exposureTime.value
+            if max_snapshot_duration is None:
+                max_snapshot_duration = exp_time
+            else:
+                max_snapshot_duration = min(max_snapshot_duration, exp_time)
+        else:
+            # CCD stream has exposure time
+            exp_time = self._mdstream._ccd.exposureTime.value
+            integration_time = exp_time
+
+            if max_snapshot_duration is None:
+                max_snapshot_duration = exp_time
+
+        if integration_time > max_snapshot_duration:
+            # calculate exposure time to be set on detector
+            integration_count = math.ceil(integration_time / max_snapshot_duration)
+            exp_time = integration_time / integration_count
+            # set the exp time on the HW VA (which might adjust it)
+            self._mdstream._ccd.exposureTime.value = self._mdstream._ccd.exposureTime.clip(exp_time)
+            # calculate the integrationCount using the actual value from the HW, in case it was
+            # modify by a lot (unlikely)
+            exp_time = self._mdstream._ccd.exposureTime.value
+            integration_count = math.ceil(integration_time / exp_time)
+            logging.debug("Using integration of %d snapshots of %s s per pixel",
+                          integration_count, exp_time)
+        else:
+            exp_time = integration_time
+            self._mdstream._ccd.exposureTime.value = exp_time
+            integration_count = 1
+
+        # Estimate the duration of a CCD frame (aka snapshot)
+        if hasVA(self._mdstream._ccd, "frameDuration"):
+            frame_duration = self._mdstream._ccd.frameDuration.value
+        else:
+            ccd_res = self._mdstream._sccd._getDetectorVA("resolution").value
+            readout = numpy.prod(ccd_res) / self._mdstream._sccd._getDetectorVA("readoutRate").value
+            frame_duration = exp_time + readout  # s
+
+        fuzzing = (hasattr(self, "fuzzing") and self.fuzzing.value)
+        if fuzzing:
+            # Pick scale and dwell-time so that the (big) pixel is scanned twice
+            # fully during the exposure. Scanning twice (instead of once) ensures
+            # that even if the exposure is slightly shorter than expected, we
+            # still get some signal from everywhere. It could also help in case
+            # the e-beam takes too much time to settle at the beginning of the
+            # scan, so that the second scan compensates a bit (but for now, we
+            # discard the second scan data :-( )
+
+            # Largest (square) resolution the dwell time permits
+            rng = self._mdstream._emitter.dwellTime.range
+            pxs = self.pxs
+            if not almost_equal(pxs[0], pxs[1]):  # TODO: support fuzzing for rectangular pxs
+                logging.warning("Pixels are not squares. Found pixel size of %s x %s", pxs[0], pxs[1])
+
+            max_tile_shape_dt = int(math.sqrt(exp_time / (rng[0] * 2)))
+            # Largest resolution the SEM scale permits
+            rep = self._rep
+            roi = self._mdstream.roi.value
+            eshape = self._mdstream._emitter.shape
+            min_scale = self._mdstream._emitter.scale.range[0]
+            max_tile_shape_scale = min(int((roi[2] - roi[0]) * eshape[0] / (min_scale[0] * rep[0])),
+                                       int((roi[3] - roi[1]) * eshape[1] / (min_scale[1] * rep[1])))
+            # Largest resolution allowed by the scanner
+            max_tile_shape_res = min(self._mdstream._emitter.resolution.range[1])
+
+            # the min of all 3 is the real maximum we can do
+            ts = max(1, min(max_tile_shape_dt, max_tile_shape_scale, max_tile_shape_res))
+            tile_shape = (ts, ts)
+            dt = (exp_time / numpy.prod(tile_shape)) / 2
+            scale = (((roi[2] - roi[0]) * eshape[0]) / (rep[0] * ts),
+                     ((roi[3] - roi[1]) * eshape[1]) / (rep[1] * ts))
+            cscale = self._mdstream._emitter.scale.clip(scale)
+
+            # Double check fuzzing would work (and make sense)
+            if ts == 1 or not (rng[0] <= dt <= rng[1]) or scale != cscale:
+                logging.info("Disabled fuzzing because SEM wouldn't support it")
+                fuzzing = False
+
+        if fuzzing:
+            logging.info("Using fuzzing with tile shape = %s", tile_shape)
+            # Handle fuzzing by scanning tile instead of spot
+            self._mdstream._emitter.scale.value = scale
+            self._mdstream._emitter.resolution.value = tile_shape  # grid scan
+            self._mdstream._emitter.dwellTime.value = self._mdstream._emitter.dwellTime.clip(dt)
+        else:
+            # Set SEM to spot mode, without caring about actual position (set later)
+            self._mdstream._emitter.scale.value = (1, 1)  # min, to avoid limits on translation
+            self._mdstream._emitter.resolution.value = (1, 1)
+            # Dwell time as long as possible, but better be slightly shorter than
+            # CCD to be sure it is not slowing thing down.
+            self._mdstream._emitter.dwellTime.value = self._mdstream._emitter.dwellTime.clip(frame_duration)
+
+        self.tile_size = self._mdstream._emitter.resolution.value  # how many SEM pixels per ebeam "position"
+        dwell_time = self._mdstream._emitter.dwellTime.value  # Read the actual value
+        self.sem_time = dwell_time * numpy.prod(self._mdstream._emitter.resolution.value)
+
+        # Order matters (a bit). At least, on the Tescan, only the "external" waits extra time to ensure
+        # a stable e-beam condition, so it should be done last.
+        if model.hasVA(self._mdstream._emitter, "blanker") and self._mdstream._emitter.blanker.value is None:
+            # When the e-beam is set to automatic blanker mode, it would switch on/off for every
+            # block of acquisition. This is not efficient, and can disrupt the e-beam. So we force
+            # "blanker" off while the acquisition is running.
+            self._orig_hw_values[self._mdstream._emitter.blanker] = self._mdstream._emitter.blanker.value
+            self._mdstream._emitter.blanker.value = False
+
+        if model.hasVA(self._mdstream._emitter, "external") and self._mdstream._emitter.external.value is None:
+            # When the e-beam is set to automatic external mode, it would switch on/off for every
+            # block of acquisition. This is not efficient, and can disrupt the e-beam. So we force
+            # "external" while the acquisition is running.
+            self._orig_hw_values[self._mdstream._emitter.external] = self._mdstream._emitter.external.value
+            self._mdstream._emitter.external.value = True
+
+        self._mdstream._ccd_df.synchronizedOn(self._mdstream._trigger)
+        # Get the CCD ready to acquire
+        self._mdstream._ccd_df.subscribe(self._mdstream._subscribers[self._mdstream._ccd_idx])
+
+        self.snapshot_time = frame_duration
+        self.integration_count = integration_count
+
+    def restore_hardware(self) -> None:
+        """
+        Restore the VAs of the hardware to their original values before the acquisition started
+        """
+        for va, value in self._orig_hw_values.items():
+            try:
+                va.value = value
+            except Exception:
+                logging.exception("Failed to restore VA %s to %s", va, value)
+
+    def prepare_acquisition(self):
+        # Compute final metadata
+        # Compute the positions on the sample (aka for the e-beam or the stage scanner)
+
+        #pos_lt = self._mdstream._getLeftTopPositionPhys()  # FIXME remove
+        self.pos_center = self._mdstream._getCenterPositionPhys()  # Independent of rotation
+        self._spot_pos = self._mdstream._getSpotPositions()
+
+    def terminate_acquisition(self):
+        """
+        Stop the spatial acquisition, so that the pixel acquisition can start.
+        """
+        # make sure it's all stopped
+        for s, sub in zip(self._mdstream._streams, self._mdstream._subscribers):
+            s._dataflow.unsubscribe(sub)
+        self._mdstream._ccd_df.synchronizedOn(None)
+
+    def start_spatial_acquisition(self, pol_idx):
+        # Not much to do here. A lot of the work is delayed until receiving the first data,
+        # which is easy to detect as px_idx = 0,0
+        pass
+
+    def start_pixel_acquisition(self, px_idx) -> Tuple[float, float]:
+        """
+
+        :param px_idx:
+        :return: the "ideal" physical coordinates of the pixel (assuming no drift)
+        """
+        trans = self._spot_pos[px_idx]
+        px_pos = (self.pos_center[0] + trans[0] * self.pxs[0],
+                  self.pos_center[1] + trans[1] * self.pxs[1])
+
+        return px_pos
+
+    def pause_pixel_acquisition(self):
+        """
+        Called just before running the leeches
+        :return:
+        """
+        # Temporarily switch the CCD to a different event trigger, so that it
+        # doesn't get triggered while the leech is running (because it could use the
+        # e-beam, which would send a startScan event)
+        self._mdstream._ccd_df.synchronizedOn(self._mdstream._ccd.softwareTrigger)
+
+    def resume_pixel_acquisition(self):
+        """
+        Called just after running the leeches
+        :return:
+        """
+        # re-use the real trigger
+        self._mdstream._ccd_df.synchronizedOn(self._mdstream._trigger)
+
+    def _move_scanner(self, px_idx: Tuple[int, int]):
+        # Move the e-beam to the position of the pixel
+        trans = tuple(self._spot_pos[px_idx])  # spot position
+
+        # take care of drift
+        if self._mdstream._dc_estimator:
+            trans = (trans[0] - self._mdstream._dc_estimator.tot_drift[0],
+                     trans[1] - self._mdstream._dc_estimator.tot_drift[1])
+        cptrans = self._mdstream._emitter.translation.clip(trans)
+        if cptrans != trans:
+            if self._mdstream._dc_estimator:
+                logging.error("Drift of %s px caused acquisition region out "
+                              "of bounds: needed to scan spot at %s.",
+                              self._mdstream._dc_estimator.tot_drift, trans)
+            else:
+                logging.error("Unexpected clipping in the scan spot position %s", trans)
+
+        self._mdstream._emitter.translation.value = cptrans
+        logging.debug("E-beam spot after drift correction: %s",
+                      self._mdstream._emitter.translation.value)
+
+
+    # TODO: rename to sub_exposure?
+    def acquire_one_snapshot(self, n: int, px_idx: Tuple[int, int]):
+        """
+        Acquires the image from the detector.
+        :param n: Number of points (pixel/ebeam positions) acquired so far.
+        :param px_idx: Current scanning position of ebeam (Y, X)
+        :param sem_time: Expected time spend for all sub-pixel.
+               (=img_time if not fuzzing, and < img_time if fuzzing)
+        """
+        self._move_scanner(px_idx)
+
+        failures = 0  # keeps track of acquisition failures
+        while True:  # Done only once normally, excepted in case of failures
+            start = time.time()
+            self._mdstream._acq_min_date = start
+            for ce in self._mdstream._acq_complete:
+                ce.clear()
+
+            self._mdstream._check_cancelled()
+
+            # Start "all" the scanners (typically there is just one). The last one is the CCD, which
+            # is already subscribed, but waiting for the startScan event.
+            # As soon as the e-beam starts scanning (which can take a couple of ms), the
+            # startScan event is sent, which triggers the acquisition of one CCD frame.
+            for s, sub in zip(self._mdstream._streams[:-1], self._mdstream._subscribers[:-1]):
+                s._dataflow.subscribe(sub)
+
+            # wait for detector to acquire image
+            timedout = self._mdstream._waitForImage(self.snapshot_time)
+
+            self._mdstream._check_cancelled()
+
+            # Check whether it went fine (= not too long and not too short)
+            dur = time.time() - start
+            if timedout or dur < self.snapshot_time * 0.95:
+                if timedout:
+                    # Note: it can happen we don't receive the data if there
+                    # no more memory left (without any other warning).
+                    # So we log the memory usage here too.
+                    memu = udriver.readMemoryUsage()
+                    # Too bad, need to use VmSize to get any good value
+                    logging.warning(
+                        "Acquisition of repetition stream for "  # TODO also image instead of px?
+                        "pixel %s timed out after %g s. "
+                        "Memory usage is %d. Will try again",
+                        px_idx, self.snapshot_time * 3 + 5, memu)
+                else:  # too fast to be possible (< the expected time - 5%)
+                    logging.warning(
+                        "Repetition stream acquisition took less than %g s: %g s, will try again",
+                        self.snapshot_time, dur)
+                failures += 1
+                if failures >= 3:
+                    # In three failures we just give up
+                    raise IOError("Repetition stream acquisition repeatedly fails to synchronize")
+                else:
+                    for s, sub, ad in zip(self._mdstream._streams, self._mdstream._subscribers, self._mdstream._acq_data):
+                        s._dataflow.unsubscribe(sub)
+                        # Ensure we don't keep the data for this run
+                        ad[:] = ad[:n]  # FIXME: does this make sense? Shouldn't acq_data be cleared after each snapshot?
+
+                    # Restart the acquisition, hoping this time we will synchronize
+                    # properly
+                    time.sleep(1)
+                    self._mdstream._ccd_df.subscribe(self._mdstream._subscribers[self._mdstream._ccd_idx])
+                    continue
+
+            # Normally, the SEM acquisitions have already completed
+            # get image for SEM streams (at least one for ebeam)
+            for s, sub, ce in zip(self._mdstream._streams[:-1], self._mdstream._subscribers[:-1],
+                                  self._mdstream._acq_complete[:-1]):
+                if not ce.wait(self.sem_time * 1.5 + 5):
+                    raise TimeoutError("Acquisition of SEM pixel %s timed out after %g s"
+                                       % (px_idx, self.sem_time * 1.5 + 5))
+                logging.debug("Got synchronisation from %s", s)
+                s._dataflow.unsubscribe(sub)
+
+            # Since we reached this point means everything went fine, so
+            # no need to retry
+            break
+
+        # Done -> immediately preprocess the data
+        for i, das in enumerate(self._mdstream._acq_data):
+            das[-1] = self._mdstream._preprocessData(i, das[-1], px_idx)
+        logging.debug("Pre-processed data %d = %s", n, px_idx)

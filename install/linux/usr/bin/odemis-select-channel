@@ -31,12 +31,40 @@ detect_channel() {
         return
     fi
 
-    # If the "odemis-proposed" PPA is active, it's "proposed", otherwise "stable".
-    if grep -q -r -E '^deb.*delmic-soft/odemis-proposed' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null; then
+    # 1. Check .list and sources.list files (ignoring commented lines)
+    if grep -qrE "^[[:space:]]*deb .*${PPA_PATTERN}" /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null; then
         echo "proposed"
-    else
-        echo "stable"
+        exit 0
     fi
+
+    # 2. Check .sources files (DEB822 format, which is used in Ubuntu 24.04 and later)
+    for file in /etc/apt/sources.list.d/*.sources; do
+        [ -f "$file" ] || continue
+
+        # TODO: for now, it only handle properly files with a single repo.
+        # An alternative would be to use "apt-get indextargets --format '$(URI)' | grep {PPA_PATTERN}"
+        # It converts everything to DEB822, and only shows the enabled ones.
+        # Not sure if it works on Ubuntu 20.04, though.
+
+        # Get the Enabled field (default to yes if missing)
+        enabled=$(grep -i '^Enabled:' "$file" | tail -n1 | awk '{print tolower($2)}')
+        [ -z "$enabled" ] && enabled="yes"
+
+        if [ "$enabled" = "no" ]; then
+            continue
+        fi
+
+        # Check if URIs field contains the PPA
+        if grep -qE "^URIs:.*${PPA_PATTERN}" "$file"; then
+            echo "proposed"
+            exit 0
+        fi
+
+    done
+
+    # It must be the stable channel.
+    # TODO: check the odemis package is installed?
+    echo "stable"
 }
 
 # Activate the "dev" channel.

@@ -96,6 +96,8 @@ from odemis.util import driver, get_best_dtype_for_acc
 
 logging.captureWarnings(True)  # Log the DAQmx warnings
 
+# TODO: to reduce time used by the logging in the thread, maybe use QueueHandler and QueueListener
+# (which allow to write the log messages in a background thread)
 
 MAX_GC_PERIOD = 10  # s, maximum time elapsed before running the garbage collector
 

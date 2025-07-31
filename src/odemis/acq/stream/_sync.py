@@ -962,15 +962,15 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
                             px_idx: Tuple[int, int], pos_lt: Tuple[float, float],
                             rep: Tuple[int, int], pol_idx: int = 0, pos_center: Tuple[float, float] = None):
         """
-        This method is (currently solely) used for CL/Monochromator which means the tile_shape/"data which is
-        scanned" can
-        vary each call. Because CL scans are done in blocks of pixels (or lines), which size may change from call
-        to call due to leeches and the required live update period. Data is appended/inserted to the corresponding
-        live_data structure at the right place with the size it has.
+        Copies to the complete (live_data) DataArray representing spatial data (of shape YX).
+        It supports receiving a block of pixel of arbitrary shape (assuming it fits in the complete
+        array).
         :param n: number of the current stream
         :param raw_data: acquired data of stream
-        :param px_idx: pixel index of the top-left pixel of raw_data: y, x.
-        :param pos_lt: position of the top-left pixel of raw_data in m: x, y.
+        :param px_idx: pixel index of the top-left pixel of raw_data: y, x. ie, the position in the
+        .
+        live_data array.
+        :param pos_lt: position of the top-left pixel of raw_data in m: x, y. (optional)
         :param rep: repetition frame/ size of entire frame
         :param pol_idx: polarisation index related to name as defined in pos_polarizations variable
         :param pos_center: used instead of pos_lt if that later one is None
@@ -1330,7 +1330,9 @@ class SEMCCDMDStream(MultipleDetectorStream):
             # TODO does not support polarimetry or image integration so far
             return self._runAcquisitionScanStage(future)
         elif self._supports_hw_sync():
-            return self._runAcquisitionHwSyncEbeam(future)
+            acquirer = SEMCCDAcquirerHwSync(self)
+            return self._genericRunAcquisition(future, acquirer)
+            # return self._runAcquisitionHwSyncEbeam(future)
         else:
             if model.hasVA(self._emitter, "scanPath"):
                 return self._runAcquisitionEbeamVector(future)
@@ -1342,7 +1344,6 @@ class SEMCCDMDStream(MultipleDetectorStream):
     def _reset_live_data(self):
         self._live_data = [[] for _ in self._streams]
         self._raw = []
-        self._anchor_raw = []
         self._current_scan_area = (0, 0, 0, 0)
 
     def _get_polarisation_positions(self) -> List[Optional[float]]:
@@ -1450,12 +1451,21 @@ class SEMCCDMDStream(MultipleDetectorStream):
                 logging.exception("Failed to update CCD live view")
             self._last_ccd_update = time.time()
 
-    def _integrate_snapshot(self, integration_count: int):
-        # integrate the acquired images one after another
-        for stream_idx, das in enumerate(self._acq_data):
-            if self._img_intor[stream_idx] is None:
-                self._img_intor[stream_idx] = img.ImageIntegrator(integration_count)
-            self._acq_data[stream_idx] = [self._img_intor[stream_idx].append(das[-1])]
+    def _integrate_snapshot(self, snapshot_das: List[Optional[model.DataArray]]) -> List[Optional[model.DataArray]]:
+        """
+        Integrate the acquired snapshots one after another. To be called for each snapshot of
+        integration_count.
+        :param snapshot_das: the data acquired for one snapshot, for each stream.
+        :return: integrated data. If this function has been called integration_count times, then
+        it countains the final data.
+        """
+        int_das = []  # (intermediate) integrated data
+        for stream_idx, da in enumerate(snapshot_das):
+            if da is None:
+                int_das.append(None)
+            int_das.append(self._img_intor[stream_idx].append(da))
+
+        return int_das
 
     def _assemble_final_data_all_streams(self):
         # Process all the (intermediary) ._live_data to the right shape/format for the final ._raw
@@ -1474,9 +1484,10 @@ class SEMCCDMDStream(MultipleDetectorStream):
 
         error = None
         self._acq_done.clear()
+        self._anchor_raw = []
         try:
             pos_polarizations = self._get_polarisation_positions()
-            shortest_leech_period = self._get_min_leech_period()
+            shortest_leech_period = self._get_min_leech_period()  # TODO: test
 
             # Prepare the hardware (different per acquisition type)
             acquirer.prepare_hardware(shortest_leech_period)
@@ -1488,8 +1499,8 @@ class SEMCCDMDStream(MultipleDetectorStream):
             self._reset_live_data()
 
             rep = self.repetition.value
-            tot_num = int(numpy.prod(rep)) * acquirer.integration_count * len(pos_polarizations)  # total number of images to acquire
-            # tot number of ebeam pos to acquire taking the number of images per ebeam pos into account
+            # total number of snapshot to acquire
+            tot_num = int(numpy.prod(rep)) * acquirer.integration_count * len(pos_polarizations)
 
             # NOTE: for hwsync: no leech (ie, 0), and no integration count (ie, 1)
             # (though, if using a vector scan, integration count would be much easier to handle,
@@ -1516,31 +1527,36 @@ class SEMCCDMDStream(MultipleDetectorStream):
                 for px_idx in numpy.ndindex(*rep[::-1]):  # last dim (X) iterates first
                     self._acq_data = [[] for _ in self._streams]  # TODO: move inside start_pixel_acquisition()?
 
-                    # Prepare integrator => global
-                    # In case of long integration time, one ImageIntegrator per stream
-                    self._img_intor = [None for _ in self._streams]
-
                     px_pos = acquirer.start_pixel_acquisition(px_idx)
 
                     # Update the SEM update location => global
                     self._update_live_area(px_idx, acquirer.tile_size)
 
+                    # Prepare integrator (also work if just one snapshot is acquired)
+                    self._img_intor = [img.ImageIntegrator(acquirer.integration_count) for _ in self._streams]
+
                     # Iterate over the integration time
+                    pixel_das = []
                     for i in range(acquirer.integration_count):
-                        start_int = time.time()
+                        start_snapshot = time.time()
 
                         # Acquire the image
                         # NOTE: for hwsync, this is just about retrieving the image
                         acquirer.acquire_one_snapshot(n, px_idx)
                         self._check_cancelled()
-                        self._integrate_snapshot(acquirer.integration_count)
-                        dur_int = time.time() - start_int
+
+                        # Note: must be before the integrate_snapshot beforehand, as it store its result in _acq_data
+                        self._update_live_pixel(acquirer.integration_count)
+
+                        # FIXME: _acq_data not compatible with hwsync => receive the data as result from acquire_snapshot
+                        # and receive result from _integrate_snapshot
+                        pixel_das = self._integrate_snapshot(self._acq_data) # FIXME
+                        dur_snapshot = time.time() - start_snapshot
                         # time left for leeches
                         leech_time_left = (tot_num - n + 1) * leech_time_p_snapshot
                         # extra time needed taking leeches into account and moving polarizer HW if present
                         extra_time = leech_time_left + time_move_pol_left
-                        self._updateProgress(future, dur_int, n + 1, tot_num, extra_time)
-                        self._update_live_pixel(acquirer.integration_count)
+                        self._updateProgress(future, dur_snapshot, n + 1, tot_num, extra_time)
                         self._run_leeches(acquirer)
                         n += 1  # number of images acquired so far
 
@@ -1549,14 +1565,33 @@ class SEMCCDMDStream(MultipleDetectorStream):
                     # integrated data, and eventually will be stored in the live_data (at the end
                     # of the pixel acquisition).
 
+                    # TODO: for hwsync, the SEM data arrives all at once at the end of the acquisition
+
                     # All the data for this pixel has been acquired => store it in the "live data".
                     # Live data = data is the same shape as the final data, but not yet completely acquired.
                     for s_idx, das in enumerate(self._acq_data):
                         self._assembleLiveData(s_idx, das[-1], px_idx, px_pos, rep, pol_idx, acquirer.pos_center)
 
+
+                    for s_idx, da in enumerate(pixel_das):
+                        if da is None:
+                            continue
+                        self._assembleLiveData(s_idx, da, px_idx, px_pos, rep, pol_idx, acquirer.pos_center)
+
+
+
                     # Activate _updateImage thread
                     self._shouldUpdateImage()
                     logging.debug("Done acquiring image number %s out of %s.", n, tot_num)
+
+                spatial_das = acquirer.complete_spatial_acquisition(pol_idx)
+                for s_idx, da in enumerate(spatial_das):
+                    if da is None:
+                        continue
+                    # pos_lt is None as we use pos_center
+                    # TODO: drop pos_lt from the call
+                    self._assembleLiveData2D(s_idx, da, (0, 0), None, rep, pol_idx,
+                                             acquirer.pos_center)
 
             # Stop the acquisition
             dur = time.time() - start_t
@@ -1600,14 +1635,15 @@ class SEMCCDMDStream(MultipleDetectorStream):
             acquirer.restore_hardware()
 
             self._dc_estimator = None
-            self._current_future = None
             self._acq_data = []  # regain a bit of memory
+            self._img_intor = []
             self._acq_done.set()
             # Only after this flag, as it's used by the im_thread too
             self._live_data = [[] for _ in self._streams]  # FIXME: can be put an empty list?
             self._streams[0].raw = []
             self._streams[0].image.value = None
-            self._img_intor = []
+
+            self._current_future = None
 
         return self.raw, error
 
@@ -4880,10 +4916,8 @@ class SEMCCDAcquirer:
 
     def prepare_acquisition(self):
         # Compute final metadata
-        # Compute the positions on the sample (aka for the e-beam or the stage scanner)
-
-        #pos_lt = self._mdstream._getLeftTopPositionPhys()  # FIXME remove
         self.pos_center = self._mdstream._getCenterPositionPhys()  # Independent of rotation
+        # Compute the positions on the sample (aka for the e-beam or the stage scanner)
         self._spot_pos = self._mdstream._getSpotPositions()
 
     def terminate_acquisition(self):
@@ -4899,6 +4933,9 @@ class SEMCCDAcquirer:
         # Not much to do here. A lot of the work is delayed until receiving the first data,
         # which is easy to detect as px_idx = 0,0
         pass
+
+    def complete_spatial_acquisition(self, pol_idx) -> List[Optional[model.DataArray]]:
+        return [None for _ in self._mdstream._streams]  # No data, as it's all been acquired per snapshot
 
     def start_pixel_acquisition(self, px_idx) -> Tuple[float, float]:
         """
@@ -4958,8 +4995,6 @@ class SEMCCDAcquirer:
         Acquires the image from the detector.
         :param n: Number of points (pixel/ebeam positions) acquired so far.
         :param px_idx: Current scanning position of ebeam (Y, X)
-        :param sem_time: Expected time spend for all sub-pixel.
-               (=img_time if not fuzzing, and < img_time if fuzzing)
         """
         self._move_scanner(px_idx)
 
@@ -5035,4 +5070,280 @@ class SEMCCDAcquirer:
         # Done -> immediately preprocess the data
         for i, das in enumerate(self._mdstream._acq_data):
             das[-1] = self._mdstream._preprocessData(i, das[-1], px_idx)
-        logging.debug("Pre-processed data %d = %s", n, px_idx)
+        logging.debug("Pre-processed data %d %s", n, px_idx)
+
+
+class SEMCCDAcquirerHwSync:
+    """
+    Acquirer for SEM CCD detectors with hardware synchronization.
+    TODO: explain more what it does and what are the limitations
+    """
+
+    def __init__(self, mdstream: SEMCCDMDStream):
+        """
+        :param mdstream: (SEMCCDMDStream) the stream to acquire from
+        """
+        self._mdstream = mdstream
+
+        # Values to be initialized when calling prepare_hardware()
+        self.integration_count = 1  # number of snapshot acquisitions to do per pixel
+        self.snapshot_time = 0.0  # time in s for one snapshot acquisition
+
+        # FIXME
+        self.sem_time = 0.0  # time in s for one SEM acquisition during a snapshot (equal or shorter to the snapshot time)
+
+        # original values of the hardware VAs to be restored after acquisition
+        self._orig_hw_values: Dict[model.VigilantAttribute, Any] = {}  # VA -> original value
+
+        self.pxs = self._mdstream._getPixelSize() # physical size a whole pixel in m (X,Y)
+        self._rep = self._mdstream.repetition.value # number of pixels in the spatial image (of the CL data)
+
+        # No fuzzing supported => always 1x1 px
+        # TODO: once scan path is supported, we can support fuzzing
+        self.tile_size = (1, 1)  # number of sub-pixels in the SEM spatial image (X,Y) (= 1,1 if no fuzzing)
+
+        # the coordinates (X,Y) of each point scanned (2D index) in px relative to the center of the FoV
+        self._spot_pos = None  # numpy array  (Y,X,2)
+        self.pos_center = None  # position of the center of the spatial acquisition in physical coordinates in m (X,Y)
+
+        self._scanner_trigger = self._det0.softwareTrigger
+        self._start_area_t = 0.0  # Timestamp of when the spatial acquisition started
+
+    def prepare_hardware(self, max_snapshot_duration: Optional[float] = None) -> None:
+        """
+        :param max_snapshot_duration: maximum exposure time for a single CCD image. If the
+        requested exposure time is longer, it will be divided into multiple snapshots.
+        This can be used when a leech period is short, to run in within a single pixel acquisition.
+        :side effects: updates .snapshot_time and .integration_count
+        """
+        # Note: if the stream has "local VA" (ie, copy of the component VA), then it is assumed that
+        # the component VA has already been set to the correct value. (ie, linkHwVAs() has been called)
+
+        # TODO: assume that all hardware supporting HwSync also support scan path, and so change to
+        # using the scan path. Then support rotation, integration time, and even fuzzing.
+        if self._mdstream._integrationTime and self._mdstream._integrationCounts.value > 1:
+            # We would need to request the e-beam scanner to duplicate each pixel N times.
+            # (in order to send N triggers to the CCD)
+            raise NotImplementedError("Integration time not supported with hardware sync")
+
+        if self._mdstream._integrationTime:
+            # This is to work around a limitation in the RepetitionStream, which doesn't update
+            # the exposureTime setting in prepare() or _linkHwVAs() in such case.
+            # TODO: fix RepetitionStream to update that setting in prepare()
+            self._mdstream._ccd.exposureTime.value = self._mdstream._integrationTime.value
+
+        integration_count = 1
+
+        fuzzing = (hasattr(self, "fuzzing") and self.fuzzing.value)
+        if fuzzing:
+            raise NotImplementedError("Fuzzing not supported with hardware sync")
+
+        # Note: no need to update the CCD settings selected by the user here, as it has already been
+        # done via the SettingsStream.
+        # FIXME: that's not true for the emitter power, and exposureTime *if* integrationTime is used.
+
+        # Set the CCD to hardware synchronised acquisition
+        # Note, when it's not directly the actual CCD, but a CompositedSpectrometer, the settings
+        # are not directly set on the CCD. Only when starting the acquisition or when setting the
+        # synchronization. So we must set the synchronization before reading the frameDuration.
+        self._mdstream._ccd_df.synchronizedOn(self._mdstream._emitter.newPixel)
+
+        if model.hasVA(self._mdstream._ccd, "dropOldFrames"):
+            # Make sure to keep all frames
+            self._orig_hw_values[self._mdstream._ccd.dropOldFrames] = self._mdstream._ccd.dropOldFrames.value
+            self._mdstream._ccd.dropOldFrames.value = False
+
+        # TODO: must force the shutter to be opened (at least, the andorcam2 driver is not compatible with
+        # external trigger + shutter). => increase the minimum shutter period? Or force the shutter to be open (with a new VA shutter?)
+        # Note: the shutter can be controlled both from the spectrograph and the CCD (as it's on the spectrograph, but
+        # controlled by the CCD). So it's fine to just control from the CCD.
+
+        # TODO: make the frameDuration getter blocking until all the settings have been updated?
+        time.sleep(0.1)  # give a bit of time for the frameDuration to be updated
+        frame_duration = self._mdstream._ccd.frameDuration.value
+        logging.debug("Frame duration of the CCD is %s (for exposure time %s)", frame_duration, self._mdstream._ccd.exposureTime.value)
+
+        # Dwell time should be the same as the frame duration of the CCD, or a tiny bit longer, to be certain
+        # the CCD is ready to receive the next hardware trigger (otherwise, it'll just be ignored)
+        frame_duration_safe = frame_duration + CCD_FRAME_OVERHEAD
+        c_dwell_time = self._mdstream._emitter.dwellTime.clip(frame_duration_safe * integration_count)
+        if c_dwell_time != frame_duration_safe * integration_count:
+            logging.warning("Dwell time requested (%s) != accepted (%s)",
+                            c_dwell_time, frame_duration_safe * integration_count)
+        self._mdstream._emitter.dwellTime.value = c_dwell_time
+
+        # Configure the SEM resolution and scale to match the repetition and RoI of the settings
+        rep = self._rep
+        roi = self._mdstream.roi.value
+        eshape = self._mdstream._emitter.shape
+        scale = (((roi[2] - roi[0]) * eshape[0]) / rep[0],
+                 ((roi[3] - roi[1]) * eshape[1]) / rep[1])
+        center = ((roi[0] + roi[2]) / 2, (roi[1] + roi[3]) / 2)
+        # translation is distance from center (situated at 0.5, 0.5), can be floats
+        trans = (eshape[0] * (center[0] - 0.5), eshape[1] * (center[1] - 0.5))
+
+        cscale = self._mdstream._emitter.scale.clip(scale)
+        if cscale != scale:
+            logging.warning("Emitter scale requested (%s) != accepted (%s)",
+                            cscale, scale)
+        # Order matters (otherwise the other parameters might be changed by the scanner)
+        self._mdstream._emitter.scale.value = cscale
+        self._mdstream._emitter.resolution.value = rep
+        self._mdstream._emitter.translation.value = trans
+
+        logging.debug("Scanning resolution is %s and scale %s",
+                      self._mdstream._emitter.resolution.value,
+                      self._mdstream._emitter.scale.value)
+
+        # TODO: to support drift correction (leeches), need to use the leech, as in SEMMDStream._runAcquisition
+        # and it will need to update the ebeam setting block per block (of variable size)
+
+        self._df0.synchronizedOn(self._scanner_trigger)
+
+        # Note: no need to force the e-beam external state, as done in SEMCCDAcquirer,
+        # because here the e-beam will scan just once, the entire area, so the driver can directly
+        # do the right thing.
+        self.snapshot_time = frame_duration_safe  # TODO: is that what we need here? Or should it be just frame_duration?
+        self.integration_count = integration_count
+
+    # TODO: move to base class
+    def restore_hardware(self) -> None:
+        """
+        Restore the VAs of the hardware to their original values before the acquisition started
+        """
+        for va, value in self._orig_hw_values.items():
+            try:
+                va.value = value
+            except Exception:
+                logging.exception("Failed to restore VA %s to %s", va, value)
+
+    def prepare_acquisition(self):
+        logging.debug("Starting hw synchronized acquisition with components %s",
+                      ", ".join(s._detector.name for s in self._mdstream._streams))
+
+        self.pos_center = self._mdstream._getCenterPositionPhys()  # Independent of rotation
+        self._spot_pos = self._mdstream._getSpotPositions()
+
+    def terminate_acquisition(self):
+        """
+        Stop the spatial acquisition, so that the pixel acquisition can start.
+        """
+        # make sure it's all stopped
+        for s, sub in zip(self._mdstream._streams, self._mdstream._subscribers):
+            s._dataflow.unsubscribe(sub)
+        self._mdstream._ccd_df.synchronizedOn(None)
+        self._mdstream._df0.synchronizedOn(None)
+
+        # Empty the queues (in case of error they might still contain some data)
+        for q in self._mdstream._acq_data_queue:
+            while not q.empty():
+                q.get()
+
+    def start_spatial_acquisition(self, pol_idx):
+        # TODO: create the _hwsync_subscribers and  _acq_data_queue in this class.
+
+        # Empty the queues (should be empty, so mostly to detect errors... and to support the
+        # simulator, which generates more frames than pixels)
+        for q in self._mdstream._acq_data_queue:
+            while not q.empty():
+                logging.warning("Emptying acquisition data queue just before acquisition")
+                q.get()
+
+        # Start CCD acquisition = last entry in _subscribers (will wait for the SEM)
+        self._mdstream._ccd_df.subscribe(self._mdstream._hwsync_subscribers[self._mdstream._ccd_idx])
+        # Wait for the CCD to be ready. Typically, it's much less than 1s, but as it's done
+        # just once per acquisition, it's not a big deal to take a bit of margin.
+        time.sleep(2.0)  # s
+        # TODO: how to know the CCD is ready? Typically, the driver knows when the device
+        # is ready, but it doesn't currently have a way to pass back this information.
+        # Have a dedicate Event for this? Or just test it by regularly sending hardware
+        # triggers until a frame is received (if the frame duration is not too long)?
+
+        # Start SEM acquisition (for "all" other detectors than the CCD)
+        for s, sub in zip(self._mdstream._streams[:-1], self._mdstream._hwsync_subscribers[:-1]):
+            s._dataflow.subscribe(sub)
+
+        self._scanner_trigger.notify()
+        logging.debug("Started e-beam scanning")
+
+        self._start_area_t = time.time()
+
+    def complete_spatial_acquisition(self, pol_idx) -> List[Optional[model.DataArray]]:
+        self._ccd_df.unsubscribe(self._hwsync_subscribers[self._ccd_idx])
+
+        das = []
+        # Receive the complete SEM data at once, after scanning the whole area.
+        for i, (s, sub, q) in enumerate(zip(self._mdstream._streams[:-1],
+                                            self._mdstream._hwsync_subscribers[:-1],
+                                            self._mdstream._acq_data_queue[:-1])):
+            sem_data = q.get(timeout=self.snapshot_time * 3 + 5)
+            logging.debug("Got SEM data from %s", s)
+            s._dataflow.unsubscribe(sub)
+
+            sem_data = self._preprocessData(i, sem_data, (0, 0))
+            das.append(sem_data)
+
+        # TODO: if there is some missing data, we could guess which pixel is missing, based on the timestamp.
+        # => adjust the result data accordingly, and reacquire the missing pixels?
+        # First step, just return the data as-is, with some big warning.
+        # (=> catch the timeout from the CCD and if the number of data missing is < 1% of the total, just
+        # end the acquisition, and pass the data... and find a way to tell the GUI to use a special name for the file.
+        # Like returning an Tuple[data, Exception]?).
+        # Or acquire in blocks of lines (~10s), and if a pixel is missing, reacquire the whole block.
+
+        das.append(None)  # No data for the CCD, as was already processed
+        return das
+
+    def start_pixel_acquisition(self, px_idx) -> Tuple[float, float]:
+        """
+
+        :param px_idx:
+        :return: the "ideal" physical coordinates of the pixel (assuming no drift)
+        """
+        # TODO: compute the px_pos on the fly based on the px_idx (to avoid storing _spot_pos)
+        trans = self._spot_pos[px_idx]
+        px_pos = (self.pos_center[0] + trans[0] * self.pxs[0],
+                  self.pos_center[1] + trans[1] * self.pxs[1])
+
+        return px_pos
+
+    def pause_pixel_acquisition(self):
+        """
+        Called just before running the leeches
+        :return:
+        """
+        raise NotImplementedError("Leeches not supported with hardware sync")
+
+    def resume_pixel_acquisition(self):
+        """
+        Called just after running the leeches
+        :return:
+        """
+        raise NotImplementedError("Leeches not supported with hardware sync")
+
+    def acquire_one_snapshot(self, n: int, px_idx: Tuple[int, int]):
+        """
+        Acquires the image from the detector.
+        :param n: Number of points (pixel/ebeam positions) acquired so far.
+        :param px_idx: Current scanning position of ebeam (Y, X)
+        """
+        # Wait for one CCD image to arrive
+        timeout = self.snapshot_time * 3 + 5
+        try:
+            ccd_data = self._mdstream._acq_data_queue[self._ccd_idx].get(timeout=timeout)
+        except queue.Empty:
+            raise TimeoutError(f"Timeout while waiting for CCD data after {timeout} s")
+
+        ccd_data = self._mdstream._preprocessData(self._ccd_idx, ccd_data, px_idx)
+        # ccd_dates.append(ccd_data.metadata[model.MD_ACQ_DATE])  # for debugging
+        logging.debug("Pre-processed data %d %s", n, px_idx)
+
+        # Once we have enough data, check if the average time per frame is not too far from
+        # the expected time (eg < +30%). If so, it can be a sign that many frames are dropped.
+        now = time.time()
+        if n > 1000 and now - self._start_area_t > 1.3 * self.snapshot_time * n:
+            logging.warning(
+                "Acquisition is too slow: acquired %d images in %g s, while should only take %g s",
+                n, now - self._start_area_t, self.snapshot_time * n)
+
+        # TODO: return all the streams data: None for the first stream(s), and finaly the CCD data.

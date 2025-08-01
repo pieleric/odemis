@@ -1145,7 +1145,8 @@ class SPARCTestCase(unittest.TestCase):
             self.assertIn(model.MD_AR_POLE, md)
             pos = md[model.MD_POS]
             self.assertTrue(phys_roi[0] <= pos[0] <= phys_roi[2] and
-                            phys_roi[1] <= pos[1] <= phys_roi[3])
+                            phys_roi[1] <= pos[1] <= phys_roi[3],
+                            "Position %s not in expected ROI %s" % (pos, phys_roi))
 
         # Short acquisition (< 0.1s)
         ars.detExposureTime.value = 0.03  # s

@@ -1274,7 +1274,7 @@ class SPARCTestCase(unittest.TestCase):
     # @skip("simple")
     def test_acq_fuz(self):
         """
-        Test short & long acquisition for Spectrometer
+        Test short & long acquisition with fuzzing for Spectrometer
         """
         # Create the stream
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam)

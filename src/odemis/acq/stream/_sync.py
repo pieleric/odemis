@@ -4001,19 +4001,15 @@ class SEMAngularSpectrumMDStream(SEMCCDMDStream):
     Data format: SEM (2D=XY) + AngularSpectrum(4D=CA1YX).
     """
 
-    def _assembleLiveData(self, n, raw_data, px_idx, px_pos, rep, pol_idx=0):
+    def _assembleLiveData(self, n: int, raw_data: model.DataArray,
+                          px_idx: Tuple[int, int], px_pos: Tuple[float, float],
+                          rep: Tuple[int, int], pol_idx: int = 0,
+                          pos_center: Tuple[float, float] = None):
         """
-        :param n: (int) number of the current stream
-        :param raw_data: acquired data of stream
-        :param px_idx: (tuple of int) pixel index: y, x
-        :param rep: (tuple of int) repetition frame
-        :param pxs_pos: position of center of data in m: x, y
-        :param pol_idx: (int) polarisation index related to name as defined in pos_polarizations variable
-         Update the ._live_data structure with the last acquired data. So that it is suitable to display in the
-         live update overlay and can be converted by _assembleFinalData into the final ._raw.
+        See MultipleDetectorStream._assembleLiveData() for the docstring.
         """
         if n != self._ccd_idx:
-            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx)
+            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx, pos_center)
 
         # Raw data format is AC
         # Final data format is CAZYX with spec_res, angle_res, 1 , X , Y with X, Y = 1 at one ebeam position
@@ -4024,7 +4020,9 @@ class SEMAngularSpectrumMDStream(SEMCCDMDStream):
         if pol_idx > len(self._live_data[n]) - 1:
             # New polarization => new DataArray
             md = raw_data.metadata.copy()
-            center, pxs = self._get_center_pxs(rep, (1, 1), self._pxs, px_pos)
+            # center, pxs = self._get_center_pxs(rep, (1, 1), self._pxs, px_pos)
+            pxs = self._pxs
+            center = pos_center
             md.update({MD_POS: center,
                        MD_PIXEL_SIZE: pxs,
                        MD_DIMS: "CAZYX",
@@ -4195,19 +4193,13 @@ class SEMARMDStream(SEMCCDMDStream):
     """
     def _assembleLiveData(self, n: int, raw_data: model.DataArray,
                           px_idx: Tuple[int, int], px_pos: Tuple[float, float],
-                          rep: Tuple[int, int], pol_idx: int = 0):
+                          rep: Tuple[int, int], pol_idx: int = 0,
+                          pos_center: Tuple[float, float] = None):
         """
-        Update the ._live_data structure with the latest acquired data. So that it is suitable to display in the
-        live update overlay and can be converted by _assembleFinalData into the final ._raw.
-        :param n: (int) number of the current stream
-        :param raw_data: acquired data of SEM stream
-        :param px_idx: (tuple of int) pixel index: y, x
-        :param px_pos: position of center of data in m: x, y
-        :param rep: size of entire data being assembled (aka repetition) in pixels: x, y
-        :param pol_idx: (int) polarisation index related to name as defined in pos_polarizations variable
+        See MultipleDetectorStream._assembleLiveData() for the docstring.
         """
         if n != self._ccd_idx:
-            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx)
+            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx, pos_center)
 
         # MD_POS default to position at the center of the FoV, but it needs to be
         # the position of the e-beam for this pixel (without the shift for drift correction)
@@ -4924,13 +4916,16 @@ class SEMCCDAcquirer:
     def start_pixel_acquisition(self, px_idx) -> Tuple[float, float]:
         """
 
-        :param px_idx:
+        :param px_idx: Y, X
         :return: the "ideal" physical coordinates of the pixel (assuming no drift)
         """
-        trans = self._spot_pos[px_idx]
-        px_pos = (self.pos_center[0] + trans[0] * self.pxs[0],
-                  self.pos_center[1] + trans[1] * self.pxs[1])
+        # TODO: double check
+        offset_px = (px_idx[1] - (self._rep[0] - 1) / 2,
+                     px_idx[0] - (self._rep[1] - 1) / 2)
+        px_pos = (self.pos_center[0] + offset_px[0] * self.pxs[0],
+                  self.pos_center[1] - offset_px[1] * self.pxs[1])  # Y is inverted in physical coordinates
 
+        logging.debug("Current pixel position in physical coordinates: %s", px_pos)  #DEBUG
         return px_pos
 
     def pause_pixel_acquisition(self):

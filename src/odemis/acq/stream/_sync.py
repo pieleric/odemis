@@ -1075,9 +1075,9 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
         except IndexError:  # Can happen if the acquisition has just finished
             if self._acq_done.is_set():
                 logging.debug("Not updating live image, as acquisition is over")
-                return
             else:
-                raise
+                logging.debug("No SEM data to update live image")  # DEBUG: just don't show anything?
+            return
 
         self.streams[0].raw = [raw_data]  # For GetBoundingBox()
         rgbim = self._projectXY2RGB(raw_data)
@@ -1330,6 +1330,7 @@ class SEMCCDMDStream(MultipleDetectorStream):
             # TODO does not support polarimetry or image integration so far
             return self._runAcquisitionScanStage(future)
         elif self._supports_hw_sync():
+            logging.debug("Running hw sync")
             acquirer = SEMCCDAcquirerHwSync(self)
             return self._genericRunAcquisition(future, acquirer)
             # return self._runAcquisitionHwSyncEbeam(future)
@@ -1463,6 +1464,7 @@ class SEMCCDMDStream(MultipleDetectorStream):
         for stream_idx, da in enumerate(snapshot_das):
             if da is None:
                 int_das.append(None)
+                continue
             int_das.append(self._img_intor[stream_idx].append(da))
 
         return int_das
@@ -5092,7 +5094,7 @@ class SEMCCDAcquirerHwSync:
         self._spot_pos = None  # numpy array  (Y,X,2)
         self.pos_center = None  # position of the center of the spatial acquisition in physical coordinates in m (X,Y)
 
-        self._scanner_trigger = self._det0.softwareTrigger
+        self._scanner_trigger = self._mdstream._det0.softwareTrigger
         self._start_area_t = 0.0  # Timestamp of when the spatial acquisition started
 
     def prepare_hardware(self, max_snapshot_duration: Optional[float] = None) -> None:
@@ -5202,7 +5204,7 @@ class SEMCCDAcquirerHwSync:
                 logging.exception("Failed to restore VA %s to %s", va, value)
 
     def prepare_acquisition(self):
-        self._df0.synchronizedOn(self._scanner_trigger)
+        self._mdstream._df0.synchronizedOn(self._scanner_trigger)
 
         logging.debug("Starting hw synchronized acquisition with components %s",
                       ", ".join(s._detector.name for s in self._mdstream._streams))
@@ -5255,18 +5257,21 @@ class SEMCCDAcquirerHwSync:
         self._start_area_t = time.time()
 
     def complete_spatial_acquisition(self, pol_idx) -> List[Optional[model.DataArray]]:
-        self._ccd_df.unsubscribe(self._hwsync_subscribers[self._ccd_idx])
+        self._mdstream._ccd_df.unsubscribe(self._mdstream._hwsync_subscribers[self._mdstream._ccd_idx])
 
         das = []
         # Receive the complete SEM data at once, after scanning the whole area.
         for i, (s, sub, q) in enumerate(zip(self._mdstream._streams[:-1],
                                             self._mdstream._hwsync_subscribers[:-1],
                                             self._mdstream._acq_data_queue[:-1])):
-            sem_data = q.get(timeout=self.snapshot_time * 3 + 5)
+            try:
+                sem_data = q.get(timeout=self.snapshot_time * 3 + 5)
+            except queue.Empty:
+                raise TimeoutError(f"Timeout while waiting for SEM data after {time.time() - selt._start_area_t} s")
             logging.debug("Got SEM data from %s", s)
             s._dataflow.unsubscribe(sub)
 
-            sem_data = self._preprocessData(i, sem_data, (0, 0))
+            sem_data = self._mdstream._preprocessData(i, sem_data, (0, 0))
             das.append(sem_data)
 
         # TODO: if there is some missing data, we could guess which pixel is missing, based on the timestamp.
@@ -5313,6 +5318,7 @@ class SEMCCDAcquirerHwSync:
         :param n: Number of points (pixel/ebeam positions) acquired so far.
         :param px_idx: Current scanning position of ebeam (Y, X)
         """
+        # Return None for the SEM data as it's received all at once at the end
         ret_das = [None for _ in self._mdstream._streams[:-1]]
 
         # Wait for one CCD image to arrive

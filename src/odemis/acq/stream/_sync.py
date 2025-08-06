@@ -958,10 +958,12 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
             md = raw_data.metadata.copy()
             # pxs: in the fuzzing acquisition, that's what we call "sub-pixel size"
             pxs = self._pxs[0] / tile_shape[1], self._pxs[1] / tile_shape[0]  # tile_shape is Y,X
+            rotation = self.rotation.value
             # TODO: shouldn't the pixel
             #center, pxs = self._get_center_pxs(rep, tile_shape[::-1], self._pxs, px_pos) # FIXME: use center??
             md.update({MD_POS: pos_center,
                        MD_PIXEL_SIZE: pxs,
+                       MD_ROTATION: rotation,
                        MD_DESCRIPTION: self._streams[n].name.value})
             da = model.DataArray(numpy.zeros(shape=rep[::-1] * numpy.array(tile_shape), dtype=raw_data.dtype), md)
             self._live_data[n].append(da)
@@ -1011,8 +1013,10 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
                 center = pos_center
             else:  # FIXME: always use pos_center
                 center, pxs = self._get_center_pxs(rep, (1, 1), self._pxs, pos_lt)
+            rotation = self.rotation.value
             md.update({MD_POS: center,
                        MD_PIXEL_SIZE: pxs,
+                       MD_ROTATION: rotation,
                        MD_DESCRIPTION: self._streams[n].name.value})
             da = model.DataArray(numpy.zeros(shape=rep[::-1], dtype=raw_data.dtype), md)
             self._live_data[n].append(da)
@@ -1344,7 +1348,7 @@ class SEMCCDMDStream(MultipleDetectorStream):
         if hasattr(self, "useScanStage") and self.useScanStage.value:
             # TODO does not support polarimetry or image integration so far
             return self._runAcquisitionScanStage(future)
-        elif self._supports_hw_sync():
+        elif False and self._supports_hw_sync():  #DEBUG
             logging.debug("Running hw sync")
             acquirer = SEMCCDAcquirerHwSync(self)
             return self._genericRunAcquisition(future, acquirer)
@@ -3700,11 +3704,13 @@ class SEMSpectrumMDStream(SEMCCDMDStream):
             # New polarization => new DataArray
             md = raw_data.metadata.copy()
             # Compute metadata to match the SEM metadata
-            #center, pxs = self._get_center_pxs(rep, (1, 1), self._pxs, px_pos)
+            #center, pxs = self._get_center_pxs(rep, (1, 1), self._pxs, px_pos)  #FIXME: remove
             pxs = self._pxs
             center = pos_center
+            rotation = self.rotation.value
             md.update({MD_POS: center,
                        MD_PIXEL_SIZE: pxs,
+                       MD_ROTATION: rotation,
                        MD_DIMS: "CTZYX",
                        MD_DESCRIPTION: self._streams[n].name.value})
 
@@ -4033,8 +4039,10 @@ class SEMAngularSpectrumMDStream(SEMCCDMDStream):
             # center, pxs = self._get_center_pxs(rep, (1, 1), self._pxs, px_pos)
             pxs = self._pxs
             center = pos_center
+            rotation = self.rotation.value
             md.update({MD_POS: center,
                        MD_PIXEL_SIZE: pxs,
+                       MD_ROTATION: rotation,
                        MD_DIMS: "CAZYX",
                        MD_DESCRIPTION: self._streams[n].name.value})
 
@@ -4144,7 +4152,7 @@ class SEMTemporalSpectrumMDStream(SEMCCDMDStream):
 
     def _assembleLiveData(self, n: int, raw_data: model.DataArray,
                           px_idx: Tuple[int, int], px_pos: Tuple[float, float],
-                          rep: Tuple[int, int], pol_idx: int = 0):
+                          rep: Tuple[int, int], pol_idx: int = 0, pos_center: Tuple[float, float] = None):
         """
         :param n: (int) number of the current stream
         :param raw_data: acquired data of stream
@@ -4156,7 +4164,7 @@ class SEMTemporalSpectrumMDStream(SEMCCDMDStream):
          live update overlay and can be converted by _assembleFinalData into the final ._raw.
         """
         if n != self._ccd_idx:
-            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx)
+            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx, pos_center)
 
         # Data format is CTZYX with spec_res, temp_res, 1 , X , Y with X, Y = 1 at one ebeam position
         temp_res = raw_data.shape[0]
@@ -4165,9 +4173,12 @@ class SEMTemporalSpectrumMDStream(SEMCCDMDStream):
         if pol_idx > len(self._live_data[n]) - 1:
             md = raw_data.metadata.copy()
             # Compute metadata to match the SEM metadata
-            center, pxs = self._get_center_pxs(rep, (1, 1), self._pxs, px_pos)
+            pxs = self._pxs
+            center = pos_center
+            rotation = self.rotation.value
             md.update({MD_POS: center,
                        MD_PIXEL_SIZE: pxs,
+                       MD_ROTATION: rotation,
                        MD_DIMS: "CTZYX",
                        MD_DESCRIPTION: self._streams[n].name.value})
 
@@ -4215,6 +4226,9 @@ class SEMARMDStream(SEMCCDMDStream):
         # the position of the e-beam for this pixel (without the shift for drift correction)
         raw_data.metadata[MD_POS] = px_pos
         raw_data.metadata[MD_DESCRIPTION] = self._streams[n].name.value
+        # Note: no rotation based on the .rotation, which is already implied by the beam position.
+        # The AR data contains a MD_ROTATION information about the rotation of the parabolic mirror
+        # relative to the X/Y axes of the SEM data.
 
         self._live_data[n].append(raw_data)
 
@@ -5095,37 +5109,44 @@ class SEMCCDAcquirerVector(SEMCCDAcquirer):
 
         # Compute final metadata
         self.pos_center = self._mdstream._getCenterPositionPhys()  # Independent of rotation
-
-        # FIXME no margin, and call per pixel, if fuzzying.
-        # => Either return a series of "paths", for scanning one tile per pixel, or could be
-        # 1 scan path (corresponding to 1 tile at 0,0 px) + the shift for each pixel
-        rep = self._rep
-        roi = self._mdstream.roi.value
-        rotation = self._mdstream.rotation.value
-        pos_flat, margin, md_cor = scan.generate_scan_vector(self._mdstream._emitter,
-                                                             self._rep, roi, rotation,
-                                                             dwell_time=None)  # No margin
-        assert margin == 0
-        pos_px = pos_flat.reshape((rep[1], rep[0], 2))
+        self._spot_pos = self._mdstream._getSpotPositions()
 
         # Compute the tile scan path
         dwell_time = self._mdstream._emitter.dwellTime.value # already computed by prepare_hardware()
+        roi = self._mdstream.roi.value
+        rep = self._rep
+        rotation = self._mdstream.rotation.value
         # Define a tile of the size of one pixel, at the center of the FoV
         tile_pxs_fov = ((roi[2] - roi[0]) / rep[0],
-                        (roi[3] - roi[1]) / rep[2])
-        tile_roi = (-tile_pxs_fov[0] / 2, - tile_pxs_fov[1] / 2,
+                        (roi[3] - roi[1]) / rep[1])
+        tile_roi = (-tile_pxs_fov[0] / 2, - tile_pxs_fov[1] / 2,  # aroud the center of the FoV
                     tile_pxs_fov[0] / 2, tile_pxs_fov[1] / 2)
         tile_res = self._mdstream._emitter.resolution.value  # 1, 1 if no fuzzing
-        pos_tile_flat, margin_tile, md_cor_tile = scan.generate_scan_vector(self._mdstream._emitter,
+        tile_pos_flat, tile_margin, tile_md_cor = scan.generate_scan_vector(self._mdstream._emitter,
                                                                             tile_res,
                                                                             tile_roi,
                                                                             rotation,
                                                                             dwell_time)
-        logging.debug("Tile scan path: %s", pos_tile_flat)  #DEBUG
+        logging.debug("Tile scan path: %s", tile_pos_flat)  #DEBUG
+        self._pos_tile_flat = tile_pos_flat  # (X*Y,2) positions of the e-beam in px relative to the center of the FoV
+        self._tile_margin = tile_margin
+        self._tile_md_cor = tile_md_cor
 
-        self._pos_flat = pos_flat  # (X*Y,2) positions of the e-beam in px relative to the center of the FoV
-        self._margin = margin
-        self._md_cor = md_cor
+        # Transformation from the RoI pixel index to physical (sample) coordinates
+        scale_px_to_phys = numpy.array([[self.pxs[0], 0],
+                                        [0, -self.pxs[1]]])  # Y is inverted in the physical coordinates
+        ct = numpy.cos(rotation)
+        st = numpy.sin(rotation)
+        rotation_px_to_phys = numpy.array([(ct, -st), (st, ct)])
+        trans_px_to_phys = scale_px_to_phys @ rotation_px_to_phys
+        self._trans_px_to_phys = trans_px_to_phys
+        half_size = (numpy.array(self._rep) - 1) / 2
+        self._offset_px_to_phys = numpy.array(self.pos_center) - half_size @ trans_px_to_phys
+        # Use as:
+        # px_pos = idx @ trans_px_to_phys + offset_px_to_phys
+
+        logging.debug("transformation: %s, offset = %s", trans_px_to_phys, offset_px_to_phys)  #DEBUG
+
 
     def terminate_acquisition(self) -> None:
         super().terminate_acquisition()
@@ -5141,7 +5162,7 @@ class SEMCCDAcquirerVector(SEMCCDAcquirer):
         """
 
         :param px_idx: Y, X
-        :return: the "ideal" physical coordinates of the pixel (assuming no drift)
+        :return: the "ideal" physical coordinates of the pixel on the sample (assuming no drift)
         """
         # TODO: use the same translation value as sent to the scanner, so that it is more
         # likely to be correct? No need to compute rotation. The tricky part is to know the
@@ -5151,14 +5172,13 @@ class SEMCCDAcquirerVector(SEMCCDAcquirer):
         # FIXME: take into account the rotation (cf matrix rotation, or vector per pixel index)
         # Compute everything ahead in prepare_acquisition()
         # => use it in the base code too?
-        half_size = (self._rep - 1) / 2
-        pos_lt_phys = self.pos_center - half_size @ trans_px_to_phys
-        px_pos = px_idx @ trans_px_to_phys + pos_lt_phys
 
-        offset_px = (px_idx[1] - (self._rep[0] - 1) / 2,
-                     px_idx[0] - (self._rep[1] - 1) / 2)
-        px_pos = (self.pos_center[0] + offset_px[0] * self.pxs[0],
-                  self.pos_center[1] - offset_px[1] * self.pxs[1])  # Y is inverted in physical coordinates
+        px_pos = px_idx @ self._trans_px_to_phys + self._offset_px_to_phys
+
+        # offset_px = (px_idx[1] - (self._rep[0] - 1) / 2,
+        #              px_idx[0] - (self._rep[1] - 1) / 2)
+        # px_pos = (self.pos_center[0] + offset_px[0] * self.pxs[0],
+        #           self.pos_center[1] - offset_px[1] * self.pxs[1])  # Y is inverted in physical coordinates
 
         logging.debug("Current pixel position in physical coordinates: %s", px_pos)  #DEBUG
         return px_pos
@@ -5191,6 +5211,7 @@ class SEMCCDAcquirerVector(SEMCCDAcquirer):
     def acquire_one_snapshot(self, n: int, px_idx: Tuple[int, int]
                              ) -> List[Optional[model.DataArray]]:
         return super().acquire_one_snapshot(n, px_idx)
+
 
 class SEMCCDAcquirerHwSync:
     """

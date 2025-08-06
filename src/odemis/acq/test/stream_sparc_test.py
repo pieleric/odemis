@@ -2658,6 +2658,10 @@ class SPARC2HwSyncTestCase(unittest.TestCase):
         specs.repetition.value = (17, 20)
         exp_pos, exp_pxs, exp_res = roi_to_phys(specs)
 
+        # FIXME: with the acquirer, it takes about 0.15s per frame (ie x3) because the semnidaq
+        # takes 0.1s to stop acquiring (essentially scanning every point twice). Did this happen
+        # before?
+
         # Start acquisition
         timeout = 1 + 2.5 * sps.estimateAcquisitionTime()
         start = time.time()

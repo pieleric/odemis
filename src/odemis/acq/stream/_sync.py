@@ -1600,7 +1600,8 @@ class SEMCCDMDStream(MultipleDetectorStream):
 
             # Stop the acquisition
             dur = time.time() - start_t
-            logging.info("Acquisition completed in %g s -> %g s/frame", dur, dur / n)
+            logging.info("Acquisition completed in %g s -> %g s/frame, frame duration = %s s",
+                         dur, dur / n, acquirer.snapshot_time * acquirer.integration_count)
 
             acquirer.terminate_acquisition()
             self._stopLeeches()
@@ -5119,16 +5120,16 @@ class SEMCCDAcquirerVector(SEMCCDAcquirer):
         # Define a tile of the size of one pixel, at the center of the FoV
         tile_pxs_fov = ((roi[2] - roi[0]) / rep[0],
                         (roi[3] - roi[1]) / rep[1])
-        tile_roi = (-tile_pxs_fov[0] / 2, - tile_pxs_fov[1] / 2,  # aroud the center of the FoV
-                    tile_pxs_fov[0] / 2, tile_pxs_fov[1] / 2)
-        tile_res = self._mdstream._emitter.resolution.value  # 1, 1 if no fuzzing
+        tile_roi = (0.5 - tile_pxs_fov[0] / 2, 0.5 - tile_pxs_fov[1] / 2,  # around the center of the FoV
+                    0.5 + tile_pxs_fov[0] / 2, 0.5 + tile_pxs_fov[1] / 2)
+        self._tile_res = self._mdstream._emitter.resolution.value  # 1, 1 if no fuzzing
         tile_pos_flat, tile_margin, tile_md_cor = scan.generate_scan_vector(self._mdstream._emitter,
-                                                                            tile_res,
+                                                                            self._tile_res,
                                                                             tile_roi,
                                                                             rotation,
                                                                             dwell_time)
         logging.debug("Tile scan path: %s", tile_pos_flat)  #DEBUG
-        self._pos_tile_flat = tile_pos_flat  # (X*Y,2) positions of the e-beam in px relative to the center of the FoV
+        self._tile_pos_flat = tile_pos_flat  # (X*Y,2) positions of the e-beam in px relative to the center of the FoV
         self._tile_margin = tile_margin
         self._tile_md_cor = tile_md_cor
 
@@ -5145,7 +5146,7 @@ class SEMCCDAcquirerVector(SEMCCDAcquirer):
         # Use as:
         # px_pos = idx @ trans_px_to_phys + offset_px_to_phys
 
-        logging.debug("transformation: %s, offset = %s", trans_px_to_phys, offset_px_to_phys)  #DEBUG
+        logging.debug("transformation: %s, offset = %s", trans_px_to_phys, self._offset_px_to_phys)  #DEBUG
 
 
     def terminate_acquisition(self) -> None:
@@ -5198,11 +5199,11 @@ class SEMCCDAcquirerVector(SEMCCDAcquirer):
             trans = (trans[0] - self._mdstream._dc_estimator.tot_drift[0],
                      trans[1] - self._mdstream._dc_estimator.tot_drift[1])
 
-        scan_path, clipped_trans = scan.shift_scan_vector(self._mdstream._emitter, self._scan_path_tile, trans)
+        scan_path, clipped_trans = scan.shift_scan_vector(self._mdstream._emitter, self._tile_pos_flat, trans)
         if trans != clipped_trans:
             logging.error("Drift of %s px caused acquisition region out "
-                          "of bounds: limited to %s px",
-                          trans, clipped_trans)
+                          "of bounds: %s limited to %s px",
+                          self._mdstream._dc_estimator.tot_drift, trans, clipped_trans)
 
         self._mdstream._emitter.scanPath.value = scan_path
         logging.debug("E-beam spot after drift correction: %s px",
@@ -5210,7 +5211,17 @@ class SEMCCDAcquirerVector(SEMCCDAcquirer):
 
     def acquire_one_snapshot(self, n: int, px_idx: Tuple[int, int]
                              ) -> List[Optional[model.DataArray]]:
-        return super().acquire_one_snapshot(n, px_idx)
+        das = super().acquire_one_snapshot(n, px_idx)
+
+        # For SEM data, need to convert raw tile into a proper 2D image
+        img_das = []
+        # We don't pass the md_cor because correct values are always computed properly in _assembleLiveData()
+        for da in das[:-1]:
+            img_das.append(scan.vector_data_to_img(da, self._tile_res, self._tile_margin, {}))
+
+        img_das.append(das[-1])
+
+        return img_das
 
 
 class SEMCCDAcquirerHwSync:
@@ -5424,7 +5435,7 @@ class SEMCCDAcquirerHwSync:
             try:
                 sem_data = q.get(timeout=self.snapshot_time * 3 + 5)
             except queue.Empty:
-                raise TimeoutError(f"Timeout while waiting for SEM data after {time.time() - selt._start_area_t} s")
+                raise TimeoutError(f"Timeout while waiting for SEM data after {time.time() - self._start_area_t} s")
             logging.debug("Got SEM data from %s", s)
             s._dataflow.unsubscribe(sub)
 

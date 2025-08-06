@@ -219,9 +219,6 @@ class SPARCTestCase(unittest.TestCase):
         self.end = end
         self.updates += 1
 
-
-    # TODO: add drift correction with period < 3x exposure time
-
     def test_acq_ar(self):
         """
         Test short & long acquisition for AR

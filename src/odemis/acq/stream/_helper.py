@@ -142,6 +142,7 @@ class RepetitionStream(LiveStream):
                                                setter=self._setPixelSize)
 
         self.rotation = model.FloatContinuous(0, range=(0, 2 * math.pi), unit="rad")
+        self.rotation.value = 0.174 # rad, = 10° DEBUG
 
         # fuzzy scanning avoids aliasing by sub-scanning each region of a pixel
         # Note: some subclasses for which it doesn't make sense will remove it

@@ -19,6 +19,28 @@ Odemis. If not, see http://www.gnu.org/licenses/.
 """
 
 # Test SPARC steams for settings and acquisition
+# There are many test cases due to the many variations, in multiple dimensions.
+# Scanner variation:
+# * "Basic" e-beam scanner
+# * "HwSync" e-beam scanner: each e-beam position sends (via a cable) a trigger to the camera
+# * "Vector" e-beam scanner: the driver supports an arbitrary list of positions (which can be used for
+# * Scanning stage: Beam doesn't move, sample does. (can be dedicated stage or sample stage)
+#
+# Detector type:
+# * CL intensity: voltage read synchronously with the SE
+# * EBIC: voltage read synchronously with the SE
+# * Counting monochromator: ticks counted synchronously with the SE
+# * Spectrum: CCD vertically binned acquiring one image per beam position
+# * AR: full CCD with 2 angles dimensions, acquiring one image per beam position
+# * Angular Spectrum: CCD with spectrum + angle dimension acquiring one image per beam position
+# * Time correlator: 1 dimension for the time, acquiring one image per beam position
+# * Temporal spectrum: CCD with spectrum + time dimension, acquiring one image per beam position
+#
+# Acquisition options:
+# * Fuzzing (only for "acquiring one image per beam position" detectors)
+# * Rotation
+# * Drift correction (and other leeches)
+
 
 import logging
 import math
@@ -2586,7 +2608,7 @@ class SPARC2HwSyncTestCase(unittest.TestCase):
     """
     @classmethod
     def setUpClass(cls):
-        testing.start_backend(SPARC2_HWSYNC_CONFIG)
+        testing.start_backend(SPARC2_HWSYNC_CONFIG)  # DEBUG
 
         # Find CCD & SEM components
         cls.ebeam = model.getComponent(role="e-beam")
@@ -2610,6 +2632,7 @@ class SPARC2HwSyncTestCase(unittest.TestCase):
         # by assuming the trigger is immediately received.
 
         specs.roi.value = (0.15, 0.6, 0.8, 0.8)
+        specs.rotation.value = math.radians(10)
 
         # Long acquisition (small rep to avoid being too long) > 0.1s
         specs.detExposureTime.value = 0.3  # s
@@ -2658,9 +2681,8 @@ class SPARC2HwSyncTestCase(unittest.TestCase):
         specs.repetition.value = (17, 20)
         exp_pos, exp_pxs, exp_res = roi_to_phys(specs)
 
-        # FIXME: with the acquirer, it takes about 0.15s per frame (ie x3) because the semnidaq
-        # takes 0.1s to stop acquiring (essentially scanning every point twice). Did this happen
-        # before?
+        # FIXME: with semnidaq, if using software sync'd, it takes about 0.15s per frame (ie x3) because the semnidaq
+        # takes 0.1s to stop acquiring/ With semcomedi, that's not the case => fix semnidaq to stop early?
 
         # Start acquisition
         timeout = 1 + 2.5 * sps.estimateAcquisitionTime()

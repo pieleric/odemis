@@ -629,6 +629,8 @@ class Acquirer:
         self._active_detectors = set()  # Detectors which are to acquire (on next start)
         self._settings_too_fast = False  # True if the latest settigs were detected to be too fast for continuous acquisition
 
+        self._should_stop = threading.Event()
+
         self._do_data_end = self._scanner._generate_signal_array_end()
         self._do_task_end = nidaqmx.Task()
         self._scanner.configure_do_task(self._do_task_end)
@@ -687,6 +689,7 @@ class Acquirer:
             prev_len = len(self._active_detectors)
             self._active_detectors.add(detector)
             if prev_len == 0:
+                self._should_stop.clear()  #DEBUG
                 self._mq.put(AcquirerMessage.ACQUIRE)
             elif prev_len != len(self._active_detectors):
                 # Different detectors => same as updating the settings
@@ -707,6 +710,15 @@ class Acquirer:
             self._active_detectors.discard(detector)
             if len(self._active_detectors) == 0:
                 self._mq.put(AcquirerMessage.STOP)
+                self._should_stop.set()  #DEBUG
+                try:
+                    logging.debug("Trying to stopping early")
+                    self._ai_task.stop()  # TODO: find a way to immediately stop the task
+                except nidaqmx.DaqError as ex:
+                    logging.debug("Failed to stop the AI task")
+                    pass
+
+
             elif prev_len != len(self._active_detectors):
                 # Different detectors => same as updating the settings
                 self._mq.put(AcquirerMessage.UPDATE_SETTINGS)
@@ -1356,6 +1368,7 @@ class Acquirer:
                 ci_tasks.append(ci_task)
 
             self._ai_dtype = self._get_ai_dtype(ai_task)
+            self._ai_task = ai_task #DEBUG
 
             for d in detectors:
                 if d is dummy_det:
@@ -1372,6 +1385,7 @@ class Acquirer:
                 else:  # Too fast for single frame? There is not much hope.
                     raise
             finally:
+                logging.debug("Cleaning up acquisition")
                 try:
                     ao_task.stop()
                     if has_event_registration:
@@ -1385,6 +1399,7 @@ class Acquirer:
                             do_task.register_every_n_samples_transferred_from_buffer_event(0, None)
                 except Exception:
                     logging.exception("Failed to stop DO task")
+                logging.debug("Stopping AI task")
                 ai_task.stop()
                 for ci_task in ci_tasks:
                     ci_task.stop()
@@ -1575,6 +1590,9 @@ class Acquirer:
         # Now we have a bit of time, let's run the garbage collector
         estimated_ai_time = samples_to_acquire / acq_settings.ai_sample_rate
         self._sem._gc_while_waiting(estimated_ai_time)
+
+        if self._should_stop.wait(estimated_ai_time * 0.8):
+            raise ImmediateStop()
 
         # Note: the nidaqmx API is annoying because arrays must be of shape
         # C,N (channel, sample numbers), *except* if C == 1, in which case

@@ -48,6 +48,7 @@ import os
 import sys
 import time
 import unittest
+from abc import ABC
 
 import numpy
 
@@ -72,7 +73,6 @@ SPARC2_INDE_EBIC_CONFIG = CONFIG_PATH + "sim/sparc2-independent-ebic-sim.odm.yam
 SPARC2_FPLM_CONFIG = CONFIG_PATH + "sim/sparc2-fplm-sim.odm.yaml"
 TIME_CORRELATOR_CONFIG = CONFIG_PATH + "sim/sparc2-time-correlator-sim.odm.yaml"
 SPARC2_HWSYNC_CONFIG = CONFIG_PATH + "sim/sparc2-nidaq-sim.odm.yaml"
-
 
 
 def roi_to_phys(repst):
@@ -109,30 +109,81 @@ def roi_to_phys(repst):
     logging.debug("Expecting pos %s, pxs %s, res %s", pos, pxs, res)
     return pos, pxs, res
 
+ROLE_TO_ATTR = {
+    "e-beam": "ebeam",
+    "se-detector": "sed",
+    "bs-detector": "bsd",
+    "ebic-detector": "ebic",
+    "cl-detector": "cl",
+    "ccd": "ccd",
+    "ccd0": "ccd",  # Should never be at the same time as ccd
+    "spectrometer": "spec",
+    "spectrometer0": "spec",   # Should never be at the same time as spectrometer
+    "spectrograph": "spgp",
+    "monochromator": "mnchr",
+    "stage": "stage",
+    "scan-stage": "scan_stage",
+    "cl-filter": "filter",
+    "time-correlator": "time_correlator",
+    "streak-ccd": "streak_ccd",
+    "streak-unit": "streak_unit",
+    "streak-delay": "streak_delay",
+    "pol-analyzer": "analyzer",
+    "light": "light",
+}
 
-class SPARCTestCase(unittest.TestCase):
-    """
-    Tests to be run with a (simulated) SPARC
-    """
+
+class BaseSPARCTestCase(unittest.TestCase, ABC):
+    simulator_config = None  # To be set by subclasses
+    capabilities = set()     # Supported acquisition types
+
     @classmethod
     def setUpClass(cls):
-        testing.start_backend(SPARC_CONFIG)
+        if cls.simulator_config is None:
+            raise unittest.SkipTest("Abstract class test, not to be run")
+        testing.start_backend(cls.simulator_config)
 
-        # Find CCD & SEM components
-        cls.ccd = model.getComponent(role="ccd")
-        cls.spec = model.getComponent(role="spectrometer")
-        cls.ebeam = model.getComponent(role="e-beam")
-        cls.sed = model.getComponent(role="se-detector")
-        cls.mnchr = model.getComponent(role="monochromator")
-        cls.spgp = model.getComponent(role="spectrograph")
+        # Find components
+        cls.microscope = model.getMicroscope()
+        components = model.getComponents()
 
-    def test_progressive_future(self):
-        """
-        Test .acquire interface (should return a progressive future with updates)
-        """
-        self.image = None
+        for c in components:
+            if c.role is None:
+                continue
+
+            try:
+                attrname = ROLE_TO_ATTR[c.role]
+                setattr(cls, attrname, c)
+            except KeyError:
+                pass
+
+    def skipIfNotSupported(self, *features):
+        if not set(features) <= self.capabilities:
+            self.skipTest(f"Simulator does not support \"{', '.join(features)}\" acquisition")
+
+    def setUp(self):
         self.done = False
         self.updates = 0
+        self.start = None
+        self.end = None
+        self._images = []
+
+    # Called when the acquisition future is completed or updates the progress
+    def on_done(self, future):
+        self.done = True
+
+    def on_progress_update(self, future, start, end):
+        self.start = start
+        self.end = end
+        self.updates += 1
+
+    # Called when a stream.image is changed
+    def _on_image(self, im):
+        self._images.append(im)
+
+    def test_progressive_future(self):
+        self.skipIfNotSupported("ar")
+        self.image = None
 
         # Create the stream
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam)
@@ -188,6 +239,7 @@ class SPARCTestCase(unittest.TestCase):
         self.assertTrue(not f.cancelled())
 
     def test_sync_future_cancel(self):
+        self.skipIfNotSupported("ar")
         self.image = None
 
         # Create the stream
@@ -233,18 +285,11 @@ class SPARCTestCase(unittest.TestCase):
         self.assertLessEqual(self.end, time.time())
         self.assertTrue(f.cancelled())
 
-    def on_done(self, future):
-        self.done = True
-
-    def on_progress_update(self, future, start, end):
-        self.start = start
-        self.end = end
-        self.updates += 1
-
     def test_acq_ar(self):
         """
         Test short & long acquisition for AR
         """
+        self.skipIfNotSupported("ar")
         # Create the stream
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam)
         ars = stream.ARSettingsStream("test ar", self.ccd, self.ccd.data, self.ebeam,
@@ -304,7 +349,7 @@ class SPARCTestCase(unittest.TestCase):
         num_ar = numpy.prod(ars.repetition.value)
 
         # Start acquisition
-        timeout = 1 + 1.5 * sas.estimateAcquisitionTime()
+        timeout = 1 + 2.5 * sas.estimateAcquisitionTime()
         start = time.time()
         f = sas.acquire()
 
@@ -334,6 +379,7 @@ class SPARCTestCase(unittest.TestCase):
         multiple times for each e-beam pixel, and hence the AR data has to be acquired via the
         integrator)
         """
+        self.skipIfNotSupported("ar")
         # Create the stream
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam)
         ars = stream.ARSettingsStream("test ar", self.ccd, self.ccd.data, self.ebeam,
@@ -362,7 +408,7 @@ class SPARCTestCase(unittest.TestCase):
                     )
 
         # Start acquisition
-        timeout = 1 + 1.5 * sas.estimateAcquisitionTime()
+        timeout = 1 + 2.5 * sas.estimateAcquisitionTime()
         start = time.time()
         for l in sems.leeches:
             l.series_start()
@@ -393,11 +439,12 @@ class SPARCTestCase(unittest.TestCase):
 
         anchor_da = sas.raw[-1]  # Normally the anchor data is the last data
         self.assertGreaterEqual(anchor_da.shape[-4], 1)
-        
+
     def test_acq_spec(self):
         """
         Test short & long acquisition for Spectrometer
         """
+        self.skipIfNotSupported("spec")
         # Create the stream
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam)
         specs = stream.SpectrumSettingsStream("test spec", self.spec, self.spec.data, self.ebeam,
@@ -484,6 +531,7 @@ class SPARCTestCase(unittest.TestCase):
         """
         Test short & long acquisition with fuzzing for Spectrometer
         """
+        self.skipIfNotSupported("spec")
         # Create the stream
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam)
         specs = stream.SpectrumSettingsStream("test spec", self.spec, self.spec.data, self.ebeam,
@@ -580,6 +628,7 @@ class SPARCTestCase(unittest.TestCase):
         """
         Test short & long acquisition for SEM MD
         """
+        self.skipIfNotSupported("monochromator")
         # Create the stream
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam,
                                 emtvas={"dwellTime", "scale", "magnification", "pixelSize"})
@@ -675,94 +724,11 @@ class SPARCTestCase(unittest.TestCase):
         numpy.testing.assert_allclose(md[model.MD_POS], exp_pos)
         numpy.testing.assert_allclose(md[model.MD_PIXEL_SIZE], exp_pxs)
 
-    def test_count(self):
-        cs = stream.CameraCountStream("test count", self.spec, self.spec.data, self.ebeam)
-        self.spec.exposureTime.value = 0.1
-        exp = self.spec.exposureTime.value
-        res = self.spec.resolution.value
-        rot = numpy.prod(res) / self.spec.readoutRate.value
-        dur = exp + rot
-        cs.windowPeriod.value = 15 * dur
-
-        # at start, no data => empty window
-        window = cs.image.value
-        self.assertEqual(len(window), 0)
-
-        # acquire for a few seconds
-        cs.should_update.value = True
-        cs.is_active.value = True
-
-        time.sleep(5 * dur)
-        # Should have received at least a few data, and max 5
-        window = cs.image.value
-        logging.debug("%s", window)
-        self.assertTrue(2 <= len(window) <= 5, len(window))
-        self.assertEqual(window.ndim, 1)
-        dates = window.metadata[model.MD_TIME_LIST]
-        self.assertLess(-cs.windowPeriod.value - dur, dates[0])
-        numpy.testing.assert_array_equal(dates, sorted(dates))
-
-        time.sleep(15 * dur)
-        # Should have received enough data to fill the window
-        window = cs.image.value
-        logging.debug("%s", window)
-        self.assertTrue(10 <= len(window) <= 16, len(window))
-
-        time.sleep(5 * dur)
-        # Window should stay long enough
-        window = cs.image.value
-        logging.debug("%s", window)
-        self.assertTrue(10 <= len(window) <= 16, len(window))
-        dates = window.metadata[model.MD_TIME_LIST]
-        self.assertLess(-cs.windowPeriod.value - dur, dates[0])
-        numpy.testing.assert_array_equal(dates, sorted(dates))
-
-
-class Fake0DDetector(model.Detector):
-    """
-    Imitates a probe current detector, but you need to send the data yourself (using
-    comp.data.notify(d)
-    """
-
-    def __init__(self, name):
-        model.Detector.__init__(self, name, "fakedet", parent=None)
-        self.data = Fake0DDataFlow()
-        self._shape = (float("inf"),)
-
-
-class Fake0DDataFlow(model.DataFlow):
-    """
-    Mock object just sufficient for the ProbeCurrentAcquirer
-    """
-
-    def get(self):
-        da = model.DataArray([1e-12], {model.MD_ACQ_DATE: time.time()})
-        return da
-
-
-class SPARC2TestCase(unittest.TestCase):
-    """
-    Tests to be run with a (simulated) SPARCv2
-    """
-    @classmethod
-    def setUpClass(cls):
-        testing.start_backend(SPARC2_HWSYNC_CONFIG)  #DEBUG
-
-        # Find CCD & SEM components
-        cls.ccd = model.getComponent(role="ccd")
-        cls.spec = model.getComponent(role="spectrometer")
-        cls.ebeam = model.getComponent(role="e-beam")
-        cls.sed = model.getComponent(role="se-detector")
-        cls.cl = model.getComponent(role="cl-detector")
-        cls.spgp = model.getComponent(role="spectrograph")
-        cls.stage = model.getComponent(role="stage")
-        # cls.sstage = model.getComponent(role="scan-stage")  #DEBUG
-        cls.filter = model.getComponent(role="cl-filter")
-
     def test_acq_cl(self):
         """
         Test short & long acquisition for SEM MD CL intensity
         """
+        self.skipIfNotSupported("cl")
         # create axes
         axes = {"filter": ("band", self.filter)}
 
@@ -798,8 +764,6 @@ class SPARC2TestCase(unittest.TestCase):
         # logging.debug("Acquisition took %g s", dur)
         # self.assertTrue(f.done())
         # self.assertEqual(len(data), len(sms.raw))
-        #
-        # return # DEBUG
 
         # Now, proper acquisition
         mcs.roi.value = (0, 0.2, 0.3, 0.6)
@@ -880,6 +844,7 @@ class SPARC2TestCase(unittest.TestCase):
         """
         Test short & long acquisition for SEM MD CL intensity with rotation
         """
+        self.skipIfNotSupported("cl")  # FIXME: only if vector scan supported?
         # create axes
         axes = {"filter": ("band", self.filter)}
 
@@ -978,6 +943,7 @@ class SPARC2TestCase(unittest.TestCase):
         """
         Test cancelling acquisition for SEM MD CL intensity
         """
+        self.skipIfNotSupported("cl")
         # Create the stream
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam,
                                 emtvas={"dwellTime", "scale", "magnification", "pixelSize"})
@@ -1040,6 +1006,7 @@ class SPARC2TestCase(unittest.TestCase):
         """
         Test short & long acquisition for SEM MD CL intensity, without SE stream
         """
+        self.skipIfNotSupported("cl")
         # Create the stream
         mcs = stream.CLSettingsStream("test",
                                       self.cl, self.cl.data, self.ebeam,
@@ -1087,6 +1054,7 @@ class SPARC2TestCase(unittest.TestCase):
         """
         Test spectrum acquisition with scan stage.
         """
+        self.skipIfNotSupported("scan-stage", "spec")
         # Check that it works even when not at 0,0 of the sample stage
         f = self.stage.moveRel({"x": -1e-3, "y": 2e-3})
         f.result()
@@ -1095,14 +1063,14 @@ class SPARC2TestCase(unittest.TestCase):
         self.ebeam.horizontalFoV.value = 200e-6
 
         # Move the stage to the top-left
-        posc = {"x": sum(self.sstage.axes["x"].range) / 2,
-                "y": sum(self.sstage.axes["y"].range) / 2}
-        f = self.sstage.moveAbs(posc)
+        posc = {"x": sum(self.scan_stage.axes["x"].range) / 2,
+                "y": sum(self.scan_stage.axes["y"].range) / 2}
+        f = self.scan_stage.moveAbs(posc)
 
         # Create the streams
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam)
         specs = stream.SpectrumSettingsStream("test spec", self.spec, self.spec.data,
-                                              self.ebeam, sstage=self.sstage,
+                                              self.ebeam, sstage=self.scan_stage,
                                               detvas={"exposureTime"})
         sps = stream.SEMSpectrumMDStream("test sem-spec", [sems, specs])
 
@@ -1146,7 +1114,7 @@ class SPARC2TestCase(unittest.TestCase):
         self.assertEqual(sp_dims, "CTZYX")
 
         # Check the stage is back to top-left
-        pos = self.sstage.position.value
+        pos = self.scan_stage.position.value
         distc = math.hypot(pos["x"] - posc["x"], pos["y"] - posc["y"])
         self.assertLessEqual(distc, 100e-9)
 
@@ -1186,19 +1154,20 @@ class SPARC2TestCase(unittest.TestCase):
         """
         Test canceling spectrum acquisition with scan stage.
         """
+        self.skipIfNotSupported("scan-stage", "spec")
         # Zoom in to make sure the ROI is not too big physically
         self.ebeam.horizontalFoV.value = 200e-6
         # self.ebeam.resolution.value = self.ebeam.resolution.clip((2048, 2048))
 
         # Move the stage to the top-left
-        posc = {"x": sum(self.sstage.axes["x"].range) / 2,
-                "y": sum(self.sstage.axes["y"].range) / 2}
-        f = self.sstage.moveAbs(posc)
+        posc = {"x": sum(self.scan_stage.axes["x"].range) / 2,
+                "y": sum(self.scan_stage.axes["y"].range) / 2}
+        f = self.scan_stage.moveAbs(posc)
 
         # Create the streams
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam)
         specs = stream.SpectrumSettingsStream("test spec", self.spec, self.spec.data,
-                                              self.ebeam, sstage=self.sstage,
+                                              self.ebeam, sstage=self.scan_stage,
                                               detvas={"exposureTime"})
         sps = stream.SEMSpectrumMDStream("test sem-spec", [sems, specs])
 
@@ -1221,7 +1190,7 @@ class SPARC2TestCase(unittest.TestCase):
         time.sleep(0.1)
 
         # Check the stage is back to top-left
-        pos = self.sstage.position.value
+        pos = self.scan_stage.position.value
         distc = math.hypot(pos["x"] - posc["x"], pos["y"] - posc["y"])
         self.assertLessEqual(distc, 100e-9)
 
@@ -1259,19 +1228,20 @@ class SPARC2TestCase(unittest.TestCase):
         """
         Test spectrum acquisition with scan stage, fuzzying, and drift correction.
         """
+        self.skipIfNotSupported("scan-stage", "spec")
         # Zoom in to make sure the ROI is not too big physically
         self.ebeam.horizontalFoV.value = 200e-6
         # self.ebeam.resolution.value = self.ebeam.resolution.clip((2048, 2048))
 
         # Move the stage to the top-left
-        posc = {"x": sum(self.sstage.axes["x"].range) / 2,
-                "y": sum(self.sstage.axes["y"].range) / 2}
-        f = self.sstage.moveAbs(posc)
+        posc = {"x": sum(self.scan_stage.axes["x"].range) / 2,
+                "y": sum(self.scan_stage.axes["y"].range) / 2}
+        f = self.scan_stage.moveAbs(posc)
 
         # Create the streams
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam)
         specs = stream.SpectrumSettingsStream("test spec", self.spec, self.spec.data,
-                                              self.ebeam, sstage=self.sstage,
+                                              self.ebeam, sstage=self.scan_stage,
                                               detvas={"exposureTime"})
         sps = stream.SEMSpectrumMDStream("test sem-spec", [sems, specs])
 
@@ -1335,7 +1305,7 @@ class SPARC2TestCase(unittest.TestCase):
         numpy.testing.assert_allclose(spec_md[model.MD_PIXEL_SIZE], exp_pxs)
 
         # Check the stage is back to top-left
-        pos = self.sstage.position.value
+        pos = self.scan_stage.position.value
         distc = math.hypot(pos["x"] - posc["x"], pos["y"] - posc["y"])
         self.assertLessEqual(distc, 100e-9)
 
@@ -1384,6 +1354,297 @@ class SPARC2TestCase(unittest.TestCase):
                                        spec_md[model.MD_PIXEL_SIZE][1] / res_upscale[1]))
         numpy.testing.assert_allclose(spec_md[model.MD_POS], exp_pos)
         numpy.testing.assert_allclose(spec_md[model.MD_PIXEL_SIZE], exp_pxs)
+
+
+    def test_acq_cl_se_ebic(self):
+        """
+        Test short & long acquisition for SE CL and EBIC acquisition simultaneously
+        """
+        self.skipIfNotSupported("ebic")
+        # create axes
+        axes = {"filter": ("band", self.filter)}
+
+        # Create the stream
+        sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam,
+                                emtvas={"dwellTime", "scale", "magnification", "pixelSize"})
+        mcs = stream.CLSettingsStream("testCL",
+                                      self.cl, self.cl.data, self.ebeam,
+                                      axis_map=axes,
+                                      emtvas={"dwellTime", })
+        mcs_two = stream.EBICSettingsStream("testEBIC",
+                                      self.ebic, self.ebic.data, self.ebeam,
+                                      emtvas={"dwellTime", })
+
+        sms = stream.SEMMDStream("test sem-md", [sems, mcs, mcs_two])
+
+        # Now, proper acquisition
+        mcs.roi.value = (0, 0.2, 0.3, 0.6)
+        mcs.tint.value = (255, 0, 0)  # Red colour
+        mcs_two.roi.value = (0, 0.2, 0.3, 0.6)
+        mcs_two.tint.value = (0, 255, 0)  # Green colour
+
+        # On the simulator, 3µs is the minimum dwell time that is accepted with 3 detectors
+        # (dwell time of sems shouldn't matter)
+        mcs.emtDwellTime.value = 3e-6  # s
+        mcs_two.emtDwellTime.value = 3e-6  # s
+
+        mcs.repetition.value = (500, 700)
+        mcs_two.repetition.value = (500, 700)
+        exp_pos, exp_pxs, exp_res = roi_to_phys(mcs)
+
+        # Start acquisition
+        logging.debug("Estimating %g s", sms.estimateAcquisitionTime())
+        timeout = 1 + 1.5 * sms.estimateAcquisitionTime()
+        start = time.time()
+        f = sms.acquire()
+
+        # wait until it's over
+        data, exp = f.result(timeout)
+        dur = time.time() - start
+        logging.debug("Acquisition took %g s", dur)
+        self.assertTrue(f.done())
+        self.assertIsNone(exp)
+        self.assertEqual(len(data), len(sms.raw))
+
+        # Both SEM and the two CLs should have the same shape
+        self.assertEqual(len(sms.raw), 3)
+        self.assertEqual(sms.raw[0].shape, exp_res[::-1])
+        self.assertEqual(sms.raw[1].shape, exp_res[::-1])
+        self.assertEqual(sms.raw[2].shape, exp_res[::-1])
+        sem_md = sms.raw[0].metadata
+        cl_md = sms.raw[1].metadata
+        cl_two_md = sms.raw[2].metadata
+        numpy.testing.assert_allclose(sem_md[model.MD_POS], cl_md[model.MD_POS])
+        numpy.testing.assert_allclose(sem_md[model.MD_PIXEL_SIZE], cl_md[model.MD_PIXEL_SIZE])
+        numpy.testing.assert_allclose(cl_md[model.MD_POS], exp_pos)
+        numpy.testing.assert_allclose(cl_md[model.MD_PIXEL_SIZE], exp_pxs)
+        numpy.testing.assert_allclose(cl_two_md[model.MD_POS], exp_pos)
+        numpy.testing.assert_allclose(cl_two_md[model.MD_PIXEL_SIZE], exp_pxs)
+        self.assertEqual(cl_md[model.MD_USER_TINT], (255, 0, 0))  # from .tint
+        self.assertEqual(cl_two_md[model.MD_USER_TINT], (0, 255, 0))  # from .tint
+        self.assertEqual(mcs.axisFilter.value, self.filter.position.value["band"])
+
+        # Now same thing but with more pixels and drift correction
+        mcs.roi.value = (0.3, 0.1, 1.0, 0.8)
+        mcs_two.roi.value = (0.3, 0.1, 1.0, 0.8)
+        dc = leech.AnchorDriftCorrector(self.ebeam, self.sed)
+        dc.period.value = 1
+        dc.roi.value = (0.525, 0.525, 0.6, 0.6)
+        dc.dwellTime.value = 1e-06
+        sems.leeches.append(dc)
+
+        mcs.repetition.value = (3000, 4000)
+        b0, b1 = list(mcs.axisFilter.choices)[:2]
+        mcs.axisFilter.value = b0
+        exp_pos, exp_pxs, exp_res = roi_to_phys(mcs)
+
+        mcs_two.repetition.value = (3000, 4000)
+
+        # Start acquisition
+        timeout = 1 + 2.5 * sms.estimateAcquisitionTime()
+        start = time.time()
+        dc.series_start()
+        f = sms.acquire()
+
+        # wait until it's over
+        data, exp = f.result(timeout)
+        dc.series_complete(data)
+        dur = time.time() - start
+        logging.debug("Acquisition took %g s", dur)
+        self.assertTrue(f.done())
+        self.assertIsNone(exp)
+        self.assertEqual(len(data), len(sms.raw))
+        # Both SEM and CL should have the same shape (and last one is anchor region)
+        self.assertEqual(len(sms.raw), 4)
+        self.assertEqual(sms.raw[0].shape, exp_res[::-1])
+        self.assertEqual(sms.raw[1].shape, exp_res[::-1])
+        self.assertEqual(sms.raw[2].shape, exp_res[::-1])
+        self.assertEqual(mcs.axisFilter.value, self.filter.position.value["band"])
+        sem_md = sms.raw[0].metadata
+        cl_md = sms.raw[1].metadata
+        cl_two_md = sms.raw[2].metadata
+        numpy.testing.assert_allclose(sem_md[model.MD_POS], cl_md[model.MD_POS])
+        numpy.testing.assert_allclose(sem_md[model.MD_PIXEL_SIZE], cl_md[model.MD_PIXEL_SIZE])
+        numpy.testing.assert_allclose(cl_md[model.MD_POS], exp_pos)
+        numpy.testing.assert_allclose(cl_md[model.MD_PIXEL_SIZE], exp_pxs)
+        numpy.testing.assert_allclose(cl_two_md[model.MD_POS], exp_pos)
+        numpy.testing.assert_allclose(cl_two_md[model.MD_PIXEL_SIZE], exp_pxs)
+        self.assertEqual(cl_md[model.MD_USER_TINT], (255, 0, 0))  # from .tint
+        self.assertEqual(cl_two_md[model.MD_USER_TINT], (0, 255, 0))  # from .tint
+
+    def test_acq_spec_rotated(self):
+        """
+        Test short & long acquisition for Spectrometer
+        """
+        self.skipIfNotSupported("spec", "vector")
+        # Create the stream
+        sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam)
+        specs = stream.SpectrumSettingsStream("test spec", self.spec, self.spec.data, self.ebeam,
+                                              detvas={"exposureTime"})
+        sps = stream.SEMSpectrumMDStream("test sem-spec", [sems, specs])
+
+        # Warning: this test cases relies on the andorcam2 simulator, which simulates HW trigger
+        # by assuming the trigger is immediately received.
+
+        specs.roi.value = (0.15, 0.6, 0.8, 0.8)
+        specs.rotation.value = math.radians(10)
+
+        # Long acquisition (small rep to avoid being too long) > 0.1s
+        specs.detExposureTime.value = 0.3  # s
+        specs.repetition.value = (5, 6)
+        exp_pos, exp_pxs, exp_res = roi_to_phys(specs)
+
+        # Start acquisition
+        timeout = 1 + 1.5 * sps.estimateAcquisitionTime()
+        im0 = specs.image.value
+        start = time.time()
+        f = sps.acquire()
+
+        # Check if there is a live update in the setting stream.
+        time.sleep(3)  # Wait long enough so that there is a new image
+        im1 = specs.image.value
+        self.assertIsInstance(im1, model.DataArray)
+        testing.assert_array_not_equal(im0, im1)
+        time.sleep(6)
+        im2 = specs.image.value
+        testing.assert_array_not_equal(im1, im2)
+
+        # wait until it's over
+        data, exp = f.result(timeout)
+        dur = time.time() - start
+        logging.debug("Acquisition took %g s", dur)
+        self.assertTrue(f.done())
+        self.assertIsNone(exp)
+        self.assertEqual(len(data), len(sps.raw))
+        sem_da = sps.raw[0]
+        self.assertEqual(sem_da.shape, exp_res[::-1])
+        sp_da = sps.raw[1]
+        sshape = sp_da.shape
+        self.assertEqual(len(sshape), 5)
+        self.assertGreater(sshape[0], 1)  # should have at least 2 wavelengths
+        sem_md = sem_da.metadata
+        spec_md = sp_da.metadata
+        numpy.testing.assert_allclose(sem_md[model.MD_POS], spec_md[model.MD_POS])
+        numpy.testing.assert_allclose(sem_md[model.MD_PIXEL_SIZE], spec_md[model.MD_PIXEL_SIZE])
+        numpy.testing.assert_allclose(spec_md[model.MD_POS], exp_pos)
+        numpy.testing.assert_allclose(spec_md[model.MD_PIXEL_SIZE], exp_pxs)
+        sp_dims = spec_md.get(model.MD_DIMS, "CTZYX"[-sp_da.ndim::])
+        self.assertEqual(sp_dims, "CTZYX")
+
+        # Short acquisition (< 0.1s)
+        specs.detExposureTime.value = 0.05  # s
+        specs.repetition.value = (17, 20)
+        exp_pos, exp_pxs, exp_res = roi_to_phys(specs)
+
+        # FIXME: with semnidaq, if using software sync'd, it takes about 0.15s per frame (ie x3) because the semnidaq
+        # takes 0.1s to stop acquiring/ With semcomedi, that's not the case => fix semnidaq to stop early?
+
+        # Start acquisition
+        timeout = 1 + 2.5 * sps.estimateAcquisitionTime()
+        start = time.time()
+        f = sps.acquire()
+
+        # wait until it's over
+        data, exp = f.result(timeout)
+        dur = time.time() - start
+        logging.debug("Acquisition took %g s", dur)
+        self.assertTrue(f.done())
+        self.assertIsNone(exp)
+        self.assertEqual(len(data), len(sps.raw))
+        sem_da = sps.raw[0]
+        self.assertEqual(sem_da.shape, exp_res[::-1])
+        sp_da = sps.raw[1]
+        sshape = sp_da.shape
+        self.assertEqual(len(sshape), 5)
+        self.assertGreater(sshape[0], 1)  # should have at least 2 wavelengths
+        sem_md = sem_da.metadata
+        spec_md = sp_da.metadata
+        numpy.testing.assert_allclose(sem_md[model.MD_POS], spec_md[model.MD_POS])
+        numpy.testing.assert_allclose(sem_md[model.MD_PIXEL_SIZE], spec_md[model.MD_PIXEL_SIZE])
+        numpy.testing.assert_allclose(spec_md[model.MD_POS], exp_pos)
+        numpy.testing.assert_allclose(spec_md[model.MD_PIXEL_SIZE], exp_pxs)
+        sp_dims = spec_md.get(model.MD_DIMS, "CTZYX"[-sp_da.ndim::])
+        self.assertEqual(sp_dims, "CTZYX")
+
+
+
+# SPARC v1
+class SPARCTestCase(BaseSPARCTestCase):
+    simulator_config = SPARC_CONFIG
+    capabilities = {"ar", "spec", "monochromator"}
+
+    def test_count(self):
+        cs = stream.CameraCountStream("test count", self.spec, self.spec.data, self.ebeam)
+        self.spec.exposureTime.value = 0.1
+        exp = self.spec.exposureTime.value
+        res = self.spec.resolution.value
+        rot = numpy.prod(res) / self.spec.readoutRate.value
+        dur = exp + rot
+        cs.windowPeriod.value = 15 * dur
+
+        # at start, no data => empty window
+        window = cs.image.value
+        self.assertEqual(len(window), 0)
+
+        # acquire for a few seconds
+        cs.should_update.value = True
+        cs.is_active.value = True
+
+        time.sleep(5 * dur)
+        # Should have received at least a few data, and max 5
+        window = cs.image.value
+        logging.debug("%s", window)
+        self.assertTrue(2 <= len(window) <= 5, len(window))
+        self.assertEqual(window.ndim, 1)
+        dates = window.metadata[model.MD_TIME_LIST]
+        self.assertLess(-cs.windowPeriod.value - dur, dates[0])
+        numpy.testing.assert_array_equal(dates, sorted(dates))
+
+        time.sleep(15 * dur)
+        # Should have received enough data to fill the window
+        window = cs.image.value
+        logging.debug("%s", window)
+        self.assertTrue(10 <= len(window) <= 16, len(window))
+
+        time.sleep(5 * dur)
+        # Window should stay long enough
+        window = cs.image.value
+        logging.debug("%s", window)
+        self.assertTrue(10 <= len(window) <= 16, len(window))
+        dates = window.metadata[model.MD_TIME_LIST]
+        self.assertLess(-cs.windowPeriod.value - dur, dates[0])
+        numpy.testing.assert_array_equal(dates, sorted(dates))
+
+
+
+class Fake0DDetector(model.Detector):
+    """
+    Imitates a probe current detector, but you need to send the data yourself (using
+    comp.data.notify(d)
+    """
+
+    def __init__(self, name):
+        model.Detector.__init__(self, name, "fakedet", parent=None)
+        self.data = Fake0DDataFlow()
+        self._shape = (float("inf"),)
+
+
+class Fake0DDataFlow(model.DataFlow):
+    """
+    Mock object just sufficient for the ProbeCurrentAcquirer
+    """
+
+    def get(self):
+        da = model.DataArray([1e-12], {model.MD_ACQ_DATE: time.time()})
+        return da
+
+
+class SPARC2TestCase(BaseSPARCTestCase):
+    """
+    Tests to be run with a (simulated) SPARCv2
+    """
+    simulator_config = SPARC2_CONFIG
+    capabilities = {"cl", "ar", "spec", "scan-stage"}
 
     def test_acq_spec_leech(self):
         """
@@ -1502,24 +1763,13 @@ class SPARC2TestCase(unittest.TestCase):
         self.assertGreater(len(pcmd), 500 / 10)
 
 
-class SPARC2TestCaseStageWrapper(unittest.TestCase):
+class SPARC2TestCaseStageWrapper(BaseSPARCTestCase):
     """
     This test case is specifically targeting the use of a stage wrapper to
     enable stage scanning with the SEM sample stage.
     """
-    @classmethod
-    def setUpClass(cls):
-        testing.start_backend(SPARC2_4SPEC_CONFIG)
-
-        # Find CCD & SEM components
-        cls.microscope = model.getMicroscope()
-        cls.ccd = model.getComponent(role="ccd0")
-        cls.spec = model.getComponent(role="spectrometer0")
-        cls.ebeam = model.getComponent(role="e-beam")
-        cls.sed = model.getComponent(role="se-detector")
-        cls.scan_stage = model.getComponent(role="scan-stage")
-        cls.sem_stage = model.getComponent(role="stage")
-        cls.ebic = model.getComponent(role="ebic-detector")
+    simulator_config = SPARC2_4SPEC_CONFIG
+    capabilities = {"cl", "ar", "spec", "scan-stage"}
 
     def test_scan_stage_wrapper(self):
         """
@@ -1536,7 +1786,7 @@ class SPARC2TestCaseStageWrapper(unittest.TestCase):
         sps = stream.SEMSpectrumMDStream("test sem-spec", [sems, specs_sstage])
 
         # Move back the stage to the center
-        self.sem_stage.moveAbsSync({"x": 0.0, "y": 0.0})
+        self.stage.moveAbsSync({"x": 0.0, "y": 0.0})
 
         # set stage scanning to true
         specs_sstage.useScanStage.value = True
@@ -1639,16 +1889,16 @@ class SPARC2TestCaseStageWrapper(unittest.TestCase):
         specs_sstage.useScanStage.value = True
 
         # get stage limits (rng)
-        xrng_stage = self.sem_stage.axes["x"].range
-        yrng_stage = self.sem_stage.axes["y"].range
+        xrng_stage = self.stage.axes["x"].range
+        yrng_stage = self.stage.axes["y"].range
 
         # do a quick out of range check
-        f = self.sem_stage.moveAbs({"x": xrng_stage[0] - 1e-6, "y": yrng_stage[0] - 1e-6})
+        f = self.stage.moveAbs({"x": xrng_stage[0] - 1e-6, "y": yrng_stage[0] - 1e-6})
         with self.assertRaises(ValueError):
             f.result()
 
         # position to got to is the top-left (stage) limit on both x and y axes
-        f = self.sem_stage.moveAbs({"x": xrng_stage[0], "y": yrng_stage[0]})
+        f = self.stage.moveAbs({"x": xrng_stage[0], "y": yrng_stage[0]})
         f.result()
 
         # now go to the top left corner and create a rectangular shaped ROI with out-of-range dimensions
@@ -1663,7 +1913,7 @@ class SPARC2TestCaseStageWrapper(unittest.TestCase):
             f.result()
 
         # Move back the stage to the center
-        self.sem_stage.moveAbsSync({"x": 0.0, "y": 0.0})
+        self.stage.moveAbsSync({"x": 0.0, "y": 0.0})
 
     def on_done(self, _):
         logging.debug("On done called")
@@ -1678,34 +1928,19 @@ class SPARC2TestCaseStageWrapper(unittest.TestCase):
         self.ebeam_positions.append(self.ebeam.translation.value)
 
 
-class SPARC2StreakCameraTestCase(unittest.TestCase):
+class SPARC2StreakCameraTestCase(BaseSPARCTestCase):
     """
     Tests to be run with a (simulated) SPARCv2 equipped with a streak camera
     for temporal spectral measurements.
     """
-    @classmethod
-    def setUpClass(cls):
-        testing.start_backend(SPARC2STREAK_CONFIG)
-
-        # Find CCD & SEM components
-        cls.streak_ccd = model.getComponent(role="streak-ccd")
-        cls.streak_unit = model.getComponent(role="streak-unit")
-        cls.streak_delay = model.getComponent(role="streak-delay")
-
-        cls.ebeam = model.getComponent(role="e-beam")
-        cls.sed = model.getComponent(role="se-detector")
-        cls.cl = model.getComponent(role="cl-detector")
-        cls.ebic = model.getComponent(role="ebic-detector")
-        cls.spgp = model.getComponent(role="spectrograph")
-
-        cls.filter = model.getComponent(role="filter")
+    simulator_config = SPARC2STREAK_CONFIG
+    capabilities = {"ebic", "streakcam"}  # For speed, skip: "cl", "ar", "ccd"
 
     def setUp(self):
         # Wait a bit for the simulator to be "ready" again (as it's not a very good simulator)
         # Otherwise, if immediately stopping & starting, the simulator may generate an old image,
         # very early.
         time.sleep(2)
-
 
     def test_streak_live_stream(self):  # TODO  this one has still exposureTime
         """ Test playing TemporalSpectrumSettingsStream
@@ -1717,7 +1952,6 @@ class SPARC2StreakCameraTestCase(unittest.TestCase):
                                                         detvas={"exposureTime", "readoutRate", "binning", "resolution"},
                                                         streak_unit_vas={"timeRange", "MCPGain", "streakMode", "shutter"})
 
-        self._image = None
         streaks.image.subscribe(self._on_image)
 
         # shouldn't affect
@@ -1746,12 +1980,12 @@ class SPARC2StreakCameraTestCase(unittest.TestCase):
         time.sleep(2)
         streaks.is_active.value = False
 
-        self.assertIsNotNone(self._image, "No temporal spectrum received after 2s")
-        self.assertIsInstance(self._image, model.DataArray)
+        self.assertGreater(len(self._images), 0, "No temporal spectrum received after 2s")
+        self.assertIsInstance(self._images[-1], model.DataArray)
         # .image should be a 2D temporal spectrum
-        self.assertEqual(self._image.shape[1::-1], streaks.detResolution.value)
+        self.assertEqual(self._images[-1].shape[1::-1], streaks.detResolution.value)
         # check if metadata is correctly stored
-        md = self._image.metadata
+        md = self._image[-1].metadata
         self.assertIn(model.MD_WL_LIST, md)
         self.assertIn(model.MD_TIME_LIST, md)
 
@@ -1776,7 +2010,6 @@ class SPARC2StreakCameraTestCase(unittest.TestCase):
                                          detvas={"exposureTime", "readoutRate", "binning", "resolution"},
                                          streak_unit_vas={"timeRange", "MCPGain", "streakMode", "shutter"})
 
-        self._image = None
         streaks.image.subscribe(self._on_image)
 
         # set GUI VAs
@@ -1818,12 +2051,12 @@ class SPARC2StreakCameraTestCase(unittest.TestCase):
         time.sleep(2)
         streaks.is_active.value = False
 
-        self.assertIsNotNone(self._image, "No temporal spectrum received after 2s")
-        self.assertIsInstance(self._image, model.DataArray)
+        self.assertGreater(len(self._images), 0,"No temporal spectrum received after 2s")
+        self.assertIsInstance(self._images[-1], model.DataArray)
         # .image should be a 2D temporal spectrum
-        self.assertEqual(self._image.shape[1::-1], streaks.detResolution.value)
+        self.assertEqual(self._images[-1].shape[1::-1], streaks.detResolution.value)
         # check if metadata is correctly stored
-        md = self._image.metadata
+        md = self._images[-1].metadata
         self.assertIn(model.MD_WL_LIST, md)
         self.assertIn(model.MD_TIME_LIST, md)
 
@@ -1838,10 +2071,6 @@ class SPARC2StreakCameraTestCase(unittest.TestCase):
         self.assertTrue(self.streak_unit.shutter.value)
 
         streaks.image.unsubscribe(self._on_image)
-
-
-    def _on_image(self, im):
-        self._image = im
 
     def test_streak_gui_vas(self):
         """ Test playing TemporalSpectrumSettingsStream
@@ -2482,254 +2711,31 @@ class SPARC2StreakCameraTestCase(unittest.TestCase):
         temporalSpectrum_drift = ts_da[-1]  # drift correction image
         self.assertGreaterEqual(temporalSpectrum_drift.shape[-4], 2)
 
-    def test_acq_cl_se_ebic(self):
-        """
-        Test short & long acquisition for SE CL and EBIC acquisition simultaneously
-        """
-        # create axes
-        axes = {"filter": ("band", self.filter)}
-
-        # Create the stream
-        sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam,
-                                emtvas={"dwellTime", "scale", "magnification", "pixelSize"})
-        mcs = stream.CLSettingsStream("testCL",
-                                      self.cl, self.cl.data, self.ebeam,
-                                      axis_map=axes,
-                                      emtvas={"dwellTime", })
-        mcs_two = stream.EBICSettingsStream("testEBIC",
-                                      self.ebic, self.ebic.data, self.ebeam,
-                                      emtvas={"dwellTime", })
-
-        sms = stream.SEMMDStream("test sem-md", [sems, mcs, mcs_two])
-
-        # Now, proper acquisition
-        mcs.roi.value = (0, 0.2, 0.3, 0.6)
-        mcs.tint.value = (255, 0, 0)  # Red colour
-        mcs_two.roi.value = (0, 0.2, 0.3, 0.6)
-        mcs_two.tint.value = (0, 255, 0)  # Green colour
-
-        # On the simulator, 3µs is the minimum dwell time that is accepted with 3 detectors
-        # (dwell time of sems shouldn't matter)
-        mcs.emtDwellTime.value = 3e-6  # s
-        mcs_two.emtDwellTime.value = 3e-6  # s
-
-        mcs.repetition.value = (500, 700)
-        mcs_two.repetition.value = (500, 700)
-        exp_pos, exp_pxs, exp_res = roi_to_phys(mcs)
-
-        # Start acquisition
-        logging.debug("Estimating %g s", sms.estimateAcquisitionTime())
-        timeout = 1 + 1.5 * sms.estimateAcquisitionTime()
-        start = time.time()
-        f = sms.acquire()
-
-        # wait until it's over
-        data, exp = f.result(timeout)
-        dur = time.time() - start
-        logging.debug("Acquisition took %g s", dur)
-        self.assertTrue(f.done())
-        self.assertIsNone(exp)
-        self.assertEqual(len(data), len(sms.raw))
-
-        # Both SEM and the two CLs should have the same shape
-        self.assertEqual(len(sms.raw), 3)
-        self.assertEqual(sms.raw[0].shape, exp_res[::-1])
-        self.assertEqual(sms.raw[1].shape, exp_res[::-1])
-        self.assertEqual(sms.raw[2].shape, exp_res[::-1])
-        sem_md = sms.raw[0].metadata
-        cl_md = sms.raw[1].metadata
-        cl_two_md = sms.raw[2].metadata
-        numpy.testing.assert_allclose(sem_md[model.MD_POS], cl_md[model.MD_POS])
-        numpy.testing.assert_allclose(sem_md[model.MD_PIXEL_SIZE], cl_md[model.MD_PIXEL_SIZE])
-        numpy.testing.assert_allclose(cl_md[model.MD_POS], exp_pos)
-        numpy.testing.assert_allclose(cl_md[model.MD_PIXEL_SIZE], exp_pxs)
-        numpy.testing.assert_allclose(cl_two_md[model.MD_POS], exp_pos)
-        numpy.testing.assert_allclose(cl_two_md[model.MD_PIXEL_SIZE], exp_pxs)
-        self.assertEqual(cl_md[model.MD_USER_TINT], (255, 0, 0))  # from .tint
-        self.assertEqual(cl_two_md[model.MD_USER_TINT], (0, 255, 0))  # from .tint
-        self.assertEqual(mcs.axisFilter.value, self.filter.position.value["band"])
-
-        # Now same thing but with more pixels and drift correction
-        mcs.roi.value = (0.3, 0.1, 1.0, 0.8)
-        mcs_two.roi.value = (0.3, 0.1, 1.0, 0.8)
-        dc = leech.AnchorDriftCorrector(self.ebeam, self.sed)
-        dc.period.value = 1
-        dc.roi.value = (0.525, 0.525, 0.6, 0.6)
-        dc.dwellTime.value = 1e-06
-        sems.leeches.append(dc)
-
-        mcs.repetition.value = (3000, 4000)
-        b0, b1 = list(mcs.axisFilter.choices)[:2]
-        mcs.axisFilter.value = b0
-        exp_pos, exp_pxs, exp_res = roi_to_phys(mcs)
-
-        mcs_two.repetition.value = (3000, 4000)
-
-        # Start acquisition
-        timeout = 1 + 2.5 * sms.estimateAcquisitionTime()
-        start = time.time()
-        dc.series_start()
-        f = sms.acquire()
-
-        # wait until it's over
-        data, exp = f.result(timeout)
-        dc.series_complete(data)
-        dur = time.time() - start
-        logging.debug("Acquisition took %g s", dur)
-        self.assertTrue(f.done())
-        self.assertIsNone(exp)
-        self.assertEqual(len(data), len(sms.raw))
-        # Both SEM and CL should have the same shape (and last one is anchor region)
-        self.assertEqual(len(sms.raw), 4)
-        self.assertEqual(sms.raw[0].shape, exp_res[::-1])
-        self.assertEqual(sms.raw[1].shape, exp_res[::-1])
-        self.assertEqual(sms.raw[2].shape, exp_res[::-1])
-        self.assertEqual(mcs.axisFilter.value, self.filter.position.value["band"])
-        sem_md = sms.raw[0].metadata
-        cl_md = sms.raw[1].metadata
-        cl_two_md = sms.raw[2].metadata
-        numpy.testing.assert_allclose(sem_md[model.MD_POS], cl_md[model.MD_POS])
-        numpy.testing.assert_allclose(sem_md[model.MD_PIXEL_SIZE], cl_md[model.MD_PIXEL_SIZE])
-        numpy.testing.assert_allclose(cl_md[model.MD_POS], exp_pos)
-        numpy.testing.assert_allclose(cl_md[model.MD_PIXEL_SIZE], exp_pxs)
-        numpy.testing.assert_allclose(cl_two_md[model.MD_POS], exp_pos)
-        numpy.testing.assert_allclose(cl_two_md[model.MD_PIXEL_SIZE], exp_pxs)
-        self.assertEqual(cl_md[model.MD_USER_TINT], (255, 0, 0))  # from .tint
-        self.assertEqual(cl_two_md[model.MD_USER_TINT], (0, 255, 0))  # from .tint
-
 
 # Skip if ubuntu is 20.04 or lower, as nidaqmx does not work there
 # Check using the python version, because that's easier than checking the OS version
 @unittest.skipIf(sys.version_info < (3, 9), "nidaqmx does not work for Ubuntu 20.04 or lower")
-class SPARC2HwSyncTestCase(unittest.TestCase):
+class SPARC2HwSyncTestCase(BaseSPARCTestCase):
     """
     Tests to be run with a (simulated) SPARCv2 using a hardware trigger between the
     e-beam scanner and the CCD/spectrometer.
     """
-    @classmethod
-    def setUpClass(cls):
-        testing.start_backend(SPARC2_HWSYNC_CONFIG)  # DEBUG
-
-        # Find CCD & SEM components
-        cls.ebeam = model.getComponent(role="e-beam")
-        cls.sed = model.getComponent(role="se-detector")
-        cls.cl = model.getComponent(role="cl-detector")
-        cls.spgp = model.getComponent(role="spectrograph")
-        cls.spec = model.getComponent(role="spectrometer")
-        cls.filter = model.getComponent(role="filter")
-
-    def test_acq_spec(self):
-        """
-        Test short & long acquisition for Spectrometer
-        """
-        # Create the stream
-        sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam)
-        specs = stream.SpectrumSettingsStream("test spec", self.spec, self.spec.data, self.ebeam,
-                                              detvas={"exposureTime"})
-        sps = stream.SEMSpectrumMDStream("test sem-spec", [sems, specs])
-
-        # Warning: this test cases relies on the andorcam2 simulator, which simulates HW trigger
-        # by assuming the trigger is immediately received.
-
-        specs.roi.value = (0.15, 0.6, 0.8, 0.8)
-        specs.rotation.value = math.radians(10)
-
-        # Long acquisition (small rep to avoid being too long) > 0.1s
-        specs.detExposureTime.value = 0.3  # s
-        specs.repetition.value = (5, 6)
-        exp_pos, exp_pxs, exp_res = roi_to_phys(specs)
-
-        # Start acquisition
-        timeout = 1 + 1.5 * sps.estimateAcquisitionTime()
-        im0 = specs.image.value
-        start = time.time()
-        f = sps.acquire()
-
-        # Check if there is a live update in the setting stream.
-        time.sleep(3)  # Wait long enough so that there is a new image
-        im1 = specs.image.value
-        self.assertIsInstance(im1, model.DataArray)
-        testing.assert_array_not_equal(im0, im1)
-        time.sleep(6)
-        im2 = specs.image.value
-        testing.assert_array_not_equal(im1, im2)
-
-        # wait until it's over
-        data, exp = f.result(timeout)
-        dur = time.time() - start
-        logging.debug("Acquisition took %g s", dur)
-        self.assertTrue(f.done())
-        self.assertIsNone(exp)
-        self.assertEqual(len(data), len(sps.raw))
-        sem_da = sps.raw[0]
-        self.assertEqual(sem_da.shape, exp_res[::-1])
-        sp_da = sps.raw[1]
-        sshape = sp_da.shape
-        self.assertEqual(len(sshape), 5)
-        self.assertGreater(sshape[0], 1)  # should have at least 2 wavelengths
-        sem_md = sem_da.metadata
-        spec_md = sp_da.metadata
-        numpy.testing.assert_allclose(sem_md[model.MD_POS], spec_md[model.MD_POS])
-        numpy.testing.assert_allclose(sem_md[model.MD_PIXEL_SIZE], spec_md[model.MD_PIXEL_SIZE])
-        numpy.testing.assert_allclose(spec_md[model.MD_POS], exp_pos)
-        numpy.testing.assert_allclose(spec_md[model.MD_PIXEL_SIZE], exp_pxs)
-        sp_dims = spec_md.get(model.MD_DIMS, "CTZYX"[-sp_da.ndim::])
-        self.assertEqual(sp_dims, "CTZYX")
-
-        # Short acquisition (< 0.1s)
-        specs.detExposureTime.value = 0.05  # s
-        specs.repetition.value = (17, 20)
-        exp_pos, exp_pxs, exp_res = roi_to_phys(specs)
-
-        # FIXME: with semnidaq, if using software sync'd, it takes about 0.15s per frame (ie x3) because the semnidaq
-        # takes 0.1s to stop acquiring/ With semcomedi, that's not the case => fix semnidaq to stop early?
-
-        # Start acquisition
-        timeout = 1 + 2.5 * sps.estimateAcquisitionTime()
-        start = time.time()
-        f = sps.acquire()
-
-        # wait until it's over
-        data, exp = f.result(timeout)
-        dur = time.time() - start
-        logging.debug("Acquisition took %g s", dur)
-        self.assertTrue(f.done())
-        self.assertIsNone(exp)
-        self.assertEqual(len(data), len(sps.raw))
-        sem_da = sps.raw[0]
-        self.assertEqual(sem_da.shape, exp_res[::-1])
-        sp_da = sps.raw[1]
-        sshape = sp_da.shape
-        self.assertEqual(len(sshape), 5)
-        self.assertGreater(sshape[0], 1)  # should have at least 2 wavelengths
-        sem_md = sem_da.metadata
-        spec_md = sp_da.metadata
-        numpy.testing.assert_allclose(sem_md[model.MD_POS], spec_md[model.MD_POS])
-        numpy.testing.assert_allclose(sem_md[model.MD_PIXEL_SIZE], spec_md[model.MD_PIXEL_SIZE])
-        numpy.testing.assert_allclose(spec_md[model.MD_POS], exp_pos)
-        numpy.testing.assert_allclose(spec_md[model.MD_PIXEL_SIZE], exp_pxs)
-        sp_dims = spec_md.get(model.MD_DIMS, "CTZYX"[-sp_da.ndim::])
-        self.assertEqual(sp_dims, "CTZYX")
+    simulator_config = SPARC2_HWSYNC_CONFIG
+    capabilities = {"ar", "spec", "hwsync", "vector"}
 
 
-class SPARC2PolAnalyzerTestCase(unittest.TestCase):
+class SPARC2PolAnalyzerTestCase(BaseSPARCTestCase):
     """
     Tests to be run with a (simulated) SPARCv2
     """
-    @classmethod
-    def setUpClass(cls):
-        testing.start_backend(SPARC2POL_CONFIG)
-
-        # Find CCD & SEM components
-        cls.ccd = model.getComponent(role="ccd")
-        cls.ebeam = model.getComponent(role="e-beam")
-        cls.sed = model.getComponent(role="se-detector")
-        cls.analyzer = model.getComponent(role="pol-analyzer")
+    simulator_config = SPARC2POL_CONFIG
+    capabilities = {"ar", "polarimetry"}
 
     def test_acq_arpol(self):
         """
         Test short acquisition for AR with polarization analyzer component
         """
+        self.skipIfNotSupported("ar", "polarimetry")
         # Create the stream
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam)
         # No exposureTime VA => integrationTime will be provided
@@ -2838,6 +2844,7 @@ class SPARC2PolAnalyzerTestCase(unittest.TestCase):
         """
         Test acquisition for SEM AR POL intensity + 1 leech
         """
+        self.skipIfNotSupported("ar", "polarimetry")
         # Create the stream
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam,
                                 emtvas={"dwellTime", "scale", "magnification", "pixelSize"})
@@ -2903,6 +2910,7 @@ class SPARC2PolAnalyzerTestCase(unittest.TestCase):
 
     def test_arpol_ss(self):
         """ Test ARSettingsStream """
+        self.skipIfNotSupported("ar", "polarimetry")
         # Create the stream
         ars = stream.ARSettingsStream("test",
                                       self.ccd, self.ccd.data, self.ebeam, analyzer=self.analyzer,
@@ -2951,6 +2959,7 @@ class SPARC2PolAnalyzerTestCase(unittest.TestCase):
         an exposure time (integration time) is requested,
         which is longer than the detector is capable of."""
 
+        self.skipIfNotSupported("ar", "polarimetry")
         # Create the settings stream without "exposureTime" VA
         ars = stream.ARSettingsStream("test ar integrate images",
                                       self.ccd, self.ccd.data, self.ebeam, analyzer=self.analyzer,
@@ -3029,6 +3038,7 @@ class SPARC2PolAnalyzerTestCase(unittest.TestCase):
     def test_ar_acq_integrated_images(self):
         """Test acquisition with camera with a long exposure time
         (integration time), so image integration is necessary."""
+        self.skipIfNotSupported("ar", "polarimetry")
 
         # Create the stream
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam,
@@ -3133,6 +3143,7 @@ class SPARC2PolAnalyzerTestCase(unittest.TestCase):
         """Test acquisition with camera with a long exposure time
         (integration time), so image integration is necessary and one leech (drift correction)."""
 
+        self.skipIfNotSupported("ar", "polarimetry")
         # Create the stream
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam,
                                 emtvas={"dwellTime", "scale", "magnification", "pixelSize"})
@@ -3203,31 +3214,16 @@ class SPARC2PolAnalyzerTestCase(unittest.TestCase):
         self.assertGreaterEqual(ar_drift.shape[-4], 2)
 
 
-class SPARC2TestCaseFPLM(unittest.TestCase):
+class SPARC2TestCaseFPLM(BaseSPARCTestCase):
     """
     This test case is specifically targeting the FPLM systems, with PL acquisition
     """
-    @classmethod
-    def setUpClass(cls):
-        testing.start_backend(SPARC2_FPLM_CONFIG)
-
-        # Find components
-        cls.microscope = model.getMicroscope()
-        cls.ebeam = model.getComponent(role="e-beam")
-        cls.sed = model.getComponent(role="se-detector")
-        cls.spec = model.getComponent(role="spectrometer")
-        cls.spgp = model.getComponent(role="spectrograph")
-        cls.filter = model.getComponent(role="filter")
-        cls.light = model.getComponent(role="light")
-
-    def setUp(self):
-        self._images = []
-
-    def _on_image(self, im):
-        self._images.append(im)
+    simulator_config = SPARC2_FPLM_CONFIG
+    capabilities = {"spec", "fplm"}
 
     def test_spec_light_ss(self):
         """ Test SpectrumSettingsStream with a light source """
+        self.skipIfNotSupported("spec", "fplm")
         # Create the stream
         specs = stream.SpectrumSettingsStream("test",
                                               self.spec, self.spec.data, self.ebeam,
@@ -3270,6 +3266,7 @@ class SPARC2TestCaseFPLM(unittest.TestCase):
         """
         Test acquisition for Spectrometer with input light
         """
+        self.skipIfNotSupported("spec", "fplm")
         # Create the stream
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam)
         specs = stream.SpectrumSettingsStream("test spec", self.spec, self.spec.data, self.ebeam,
@@ -3321,61 +3318,19 @@ class SPARC2TestCaseFPLM(unittest.TestCase):
         self.assertEqual(sp_dims, "CTZYX")
 
 
-class SPARC2TestCaseIndependentDetector(unittest.TestCase):
+class SPARC2TestCaseIndependentDetector(BaseSPARCTestCase):
     """
     This test case is specifically targeting the IndependentEBICStream
     """
-    @classmethod
-    def setUpClass(cls):
-        testing.start_backend(SPARC2_INDE_EBIC_CONFIG)
-
-        # Find components
-        cls.microscope = model.getMicroscope()
-        cls.ebeam = model.getComponent(role="e-beam")
-        cls.sed = model.getComponent(role="se-detector")
-        cls.ebic = model.getComponent(role="ebic-detector")
-        cls.filter = model.getComponent(role="filter")
-        cls.cl = model.getComponent(role="cl-detector")
-
-    def _roiToPhys(self, repst):
-        """
-        Compute the (expected) physical position of a stream ROI
-        repst (RepetitionStream): the repetition stream with ROI
-        return:
-            pos (tuple of 2 floats): physical position of the center
-            pxs (tuple of 2 floats): pixel size in m
-            res (tuple of ints): number of pixels
-        """
-        res = repst.repetition.value
-        pxs = (repst.pixelSize.value,) * 2
-
-        # To compute pos, we need to convert the ROI to physical coordinates
-        roi = repst.roi.value
-        roi_center = ((roi[0] + roi[2]) / 2, (roi[1] + roi[3]) / 2)
-
-        try:
-            sem_center = repst.detector.getMetadata()[model.MD_POS]
-        except KeyError:
-            # no stage => pos is always 0,0
-            sem_center = (0, 0)
-        # TODO: pixelSize will be updated when the SEM magnification changes,
-        # so we might want to recompute this ROA whenever pixelSize changes so
-        # that it's always correct (but maybe not here in the view)
-        emt = repst.emitter
-        sem_width = (emt.shape[0] * emt.pixelSize.value[0],
-                     emt.shape[1] * emt.pixelSize.value[1])
-        # In physical coordinates Y goes up, but in ROI, Y goes down => "1-"
-        pos = (sem_center[0] + sem_width[0] * (roi_center[0] - 0.5),
-               sem_center[1] - sem_width[1] * (roi_center[1] - 0.5))
-
-        logging.debug("Expecting pos %s, pxs %s, res %s", pos, pxs, res)
-        return pos, pxs, res
+    simulator_config = SPARC2_INDE_EBIC_CONFIG
+    capabilities = {"cl", "ebic-inde"}
 
     def test_ebic_live_stream(self):
         """
         Test live IndependentEBICStream, and especially, that it can provide continuous
         images, although the hardware doesn't support continuous acquisition.
         """
+        self.skipIfNotSupported("ebic-inde")
         ebics = stream.IndependentEBICStream("test ebic", self.ebic, self.ebic.data,
                                              self.ebeam, self.sed.data,
                                              emtvas={"dwellTime"})
@@ -3422,10 +3377,8 @@ class SPARC2TestCaseIndependentDetector(unittest.TestCase):
 
         ebics.image.unsubscribe(self._on_image)
 
-    def _on_image(self, im):
-        self._images.append(im)
-
     def test_ebic_acq(self):
+        self.skipIfNotSupported("ebic-inde")
         # Create the stream
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam,
                                 emtvas={"dwellTime", "scale", "magnification", "pixelSize"})
@@ -3509,6 +3462,7 @@ class SPARC2TestCaseIndependentDetector(unittest.TestCase):
         """
         Test acquisition for SE+CL+EBIC acquisition simultaneously (aka "folded stream")
         """
+        self.skipIfNotSupported("ebic-inde")
         # create axes
         axes = {"filter": ("band", self.filter)}
 
@@ -3572,22 +3526,18 @@ class SPARC2TestCaseIndependentDetector(unittest.TestCase):
         self.assertEqual(mcs.axisFilter.value, self.filter.position.value["band"])
 
 
-class TimeCorrelatorTestCase(unittest.TestCase):
+class TimeCorrelatorTestCase(BaseSPARCTestCase):
     """
     Tests the SEMTemporalMDStream.
     """
+    simulator_config = TIME_CORRELATOR_CONFIG
+    capabilities = {"ar", "time-correlator"}
 
     @classmethod
     def setUpClass(cls):
-        testing.start_backend(TIME_CORRELATOR_CONFIG)
+        super().setUpClass()
 
-        # Find CCD & SEM components
-        cls.time_correlator = model.getComponent(role="time-correlator")
-        cls.ebeam = model.getComponent(role="e-beam")
-        cls.sed = model.getComponent(role="se-detector")
-
-        mic = model.getMicroscope()
-        cls.optmngr = path.OpticalPathManager(mic)
+        cls.optmngr = path.OpticalPathManager(cls.microscope)
 
         # Wait extra time for the referencing at init
         # (during referencing the shutters are force closed, so the acquisition
@@ -3598,6 +3548,7 @@ class TimeCorrelatorTestCase(unittest.TestCase):
         """
         Test the output of a simple acquisition and one with subpixel drift correction.
         """
+        self.skipIfNotSupported("time-correlator")
         tc_stream = stream.ScannedTemporalSettingsStream(
             "Time Correlator",
             self.time_correlator,
@@ -3725,13 +3676,18 @@ class SettingsStreamsTestCase(unittest.TestCase):
         mic = model.getMicroscope()
         cls.optmngr = path.OpticalPathManager(mic)
 
+    def setUp(self):
+        self._image = None
+
+    def _on_image(self, im):
+        self._image = im
+
     def test_spec_ss(self):
         """ Test SpectrumSettingsStream """
         # Create the stream
         specs = stream.SpectrumSettingsStream("test",
                                               self.spec, self.spec.data, self.ebeam,
                                               detvas={"exposureTime", "readoutRate", "binning", "resolution"})
-        self._image = None
         specs.image.subscribe(self._on_image)
 
         # shouldn't affect
@@ -3801,7 +3757,6 @@ class SettingsStreamsTestCase(unittest.TestCase):
         specs = stream.SpectrumSettingsStream("test",
                                               self.spec, self.spec.data, self.ebeam, opm=self.optmngr,
                                               detvas={"exposureTime", "readoutRate", "binning", "resolution"})
-        self._image = None
         specs.image.subscribe(self._on_image)
 
         # Make sure the optical math is not in the right place, so that it takes
@@ -3836,7 +3791,6 @@ class SettingsStreamsTestCase(unittest.TestCase):
                                                  emtvas={"dwellTime", })
         spots = stream.SpotSEMStream("spot", self.sed, self.sed.data, self.ebeam)
 
-        self._image = None
         mcs.image.subscribe(self._on_image)
 
         # start spot mode
@@ -3884,7 +3838,6 @@ class SettingsStreamsTestCase(unittest.TestCase):
         ars = stream.ARSettingsStream("test",
                                       self.ccd, self.ccd.data, self.ebeam,
                                       detvas={"exposureTime", "readoutRate", "binning", "resolution"})
-        self._image = None
         ars.image.subscribe(self._on_image)
 
         # shouldn't affect
@@ -3932,7 +3885,6 @@ class SettingsStreamsTestCase(unittest.TestCase):
                                       self.cl, self.cl.data, self.ebeam,
                                       axis_map=axes,
                                       emtvas={"dwellTime", })  # note: not "scale", "resolution"
-        self._image = None
         cls.image.subscribe(self._on_image)
 
         # shouldn't affect
@@ -3993,11 +3945,6 @@ class SettingsStreamsTestCase(unittest.TestCase):
         self.assertAlmostEqual(new_scale / old_scale, ratio)
 
         cls.image.unsubscribe(self._on_image)
-
-    def _on_image(self, im):
-        self._image = im
-
-
 
 
 if __name__ == "__main__":

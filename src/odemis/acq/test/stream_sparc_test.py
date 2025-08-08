@@ -1937,6 +1937,7 @@ class SPARC2StreakCameraTestCase(BaseSPARCTestCase):
     capabilities = {"ebic", "streakcam"}  # For speed, skip: "cl", "ar", "ccd"
 
     def setUp(self):
+        super().setUp()
         # Wait a bit for the simulator to be "ready" again (as it's not a very good simulator)
         # Otherwise, if immediately stopping & starting, the simulator may generate an old image,
         # very early.
@@ -1985,7 +1986,7 @@ class SPARC2StreakCameraTestCase(BaseSPARCTestCase):
         # .image should be a 2D temporal spectrum
         self.assertEqual(self._images[-1].shape[1::-1], streaks.detResolution.value)
         # check if metadata is correctly stored
-        md = self._image[-1].metadata
+        md = self._images[-1].metadata
         self.assertIn(model.MD_WL_LIST, md)
         self.assertIn(model.MD_TIME_LIST, md)
 
@@ -3531,7 +3532,7 @@ class TimeCorrelatorTestCase(BaseSPARCTestCase):
     Tests the SEMTemporalMDStream.
     """
     simulator_config = TIME_CORRELATOR_CONFIG
-    capabilities = {"ar", "time-correlator"}
+    capabilities = {"time-correlator"}  # Skip: "ar", "spec", "cl"
 
     @classmethod
     def setUpClass(cls):
@@ -3544,7 +3545,7 @@ class TimeCorrelatorTestCase(BaseSPARCTestCase):
         # goes faster because the shutters can't open anyway, which is not realistic)
         time.sleep(10)
 
-    def test_acquisition(self):
+    def test_tc_acquisition(self):
         """
         Test the output of a simple acquisition and one with subpixel drift correction.
         """
@@ -3603,13 +3604,19 @@ class TimeCorrelatorTestCase(BaseSPARCTestCase):
         tc_stream.repetition.value = (1, 2)
         tc_stream.detDwellTime.value = 2
 
+        for l in sem_stream.leeches:
+            l.series_start()
+
         f = sem_tc_stream.acquire()
+
         time.sleep(0.1)
         # Dwell time on detector and emitter should be reduced by 1/2
         self.assertEqual(self.time_correlator.dwellTime.value, 1)
         # SEM dwell time might be either 1s, or the drift correction dwell time
         self.assertIn(self.ebeam.dwellTime.value, (1, 1e-6))
         data, exp = f.result()
+        for l in sem_stream.leeches:
+            l.series_complete(data)
         self.assertIsNone(exp)
 
         self.assertEqual(len(data), 3)  # additional anchor region data array
@@ -3618,7 +3625,7 @@ class TimeCorrelatorTestCase(BaseSPARCTestCase):
         self.assertEqual(data[1].shape[-1], 1)
         self.assertEqual(data[1].shape[-2], 2)
 
-    def test_acq_live_update(self):
+    def test_tc_acq_live_update(self):
         """
         Test if live update works for the time correlator
         """

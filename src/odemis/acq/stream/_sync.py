@@ -256,14 +256,14 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
         return tuple(r)
 
     @abstractmethod
-    def _estimateRawAcquisitionTime(self):
+    def _estimateRawAcquisitionTime(self) -> float:
         """
         return (float): time in s for acquiring the whole image, without drift
          correction
         """
         return 0
 
-    def estimateAcquisitionTime(self):
+    def estimateAcquisitionTime(self) -> float:
         # Time required without drift correction
         total_time = self._estimateRawAcquisitionTime()  # Note: includes image integration
 
@@ -1145,9 +1145,10 @@ class SEMCCDMDStream(MultipleDetectorStream):
             raise ValueError("Requires exactly 2 streams")
 
         s1 = streams[1]  # detector stream
-        if not (model.hasVA(s1._detector, "exposureTime")):
-            raise ValueError("%s detector '%s' doesn't seem to be a CCD" %
-                             (s1, s1._detector.name,))
+        if (not model.hasVA(s1._detector, "exposureTime")
+            and not model.hasVA(s1._detector, "dwellTime")
+        ):
+            raise ValueError(f"{s1} detector '{s1._detector.name}' doesn't seem to be a detector")
 
         self._sccd = s1
         self._ccd = s1._detector
@@ -3006,6 +3007,23 @@ class SEMCCDMDStream(MultipleDetectorStream):
 
         return self.raw, error
 
+    def _assembleFinalData(self, n, data):
+        """
+        Standard behaviour for SEM + CCD stream: the SEM data is stored as one image, and the
+        CCD data is stored as one image per polarization.
+        :param n: (int) number of the current stream which is assembled into ._raw
+        :param data: all acquired data of the stream
+        """
+        if n != self._ccd_idx:
+            return super()._assembleFinalData(n, data)
+
+        if len(data) > 1:  # Multiple polarizations => keep them separated, and add the polarization name to the description
+            for d in data:
+                d.metadata[model.MD_DESCRIPTION] += " " + d.metadata[model.MD_POL_MODE]
+
+        self._raw.extend(data)
+
+
 class SEMMDStream(MultipleDetectorStream):
     """
     MDStream which handles when all the streams' detectors are linked to the
@@ -3726,7 +3744,7 @@ class SEMSpectrumMDStream(SEMCCDMDStream):
         self._live_data[n][pol_idx][:, 0, 0, px_idx[0], px_idx[1]] = raw_data.reshape(spec_shape[1])
 
 
-class SEMTemporalMDStream(MultipleDetectorStream):
+class SEMTemporalMDStream(SEMCCDMDStream):
     """
     Multiple detector Stream made of SEM + time correlator for lifetime or g(2) mapping.
 
@@ -3734,286 +3752,366 @@ class SEMTemporalMDStream(MultipleDetectorStream):
     become necessary to carry out multiple drift corrections per pixel. This functionality
     is implemented here.
     """
+    # FIXME: acquirer needs to support .dwellTime instead of exposure time
 
-    # TODO: implement multiple dwell time corrections per pixel in SEMCCDStream, so we don't
-    # have duplicate code and a correct implementation that works with leeches and other features.
-
-    def __init__(self, name, streams):
-        """
-        streams (list of Streams): in addition to the requirements of
-          MultipleDetectorStream, there should be precisely two streams. The
-          first one MUST be controlling the SEM e-beam, while the last stream
-          must be a time correlator stream.
-        """
-        if streams[0]._detector.role not in EBEAM_DETECTORS:
-            raise ValueError("First stream detector %s doesn't control e-beam" %
-                             (streams[0]._detector.name,))
-        if streams[1]._detector.role != "time-correlator":
-            raise ValueError("Second stream detector needs to have 'time-correlator' " +
-                             "as its role, not %s." % streams[1]._detector.role)
-
-        super().__init__(name, streams)
-
-        self._se_stream = streams[0]
-        self._tc_stream = streams[1]
-        self._trigger = self._emitter.startScan  # to acquire a CCD image every time the SEM starts a new scan
-
-    def _estimateRawAcquisitionTime(self):
-        res = numpy.prod(self._tc_stream.repetition.value)
-        pxTime = self._tc_stream._getDetectorVA("dwellTime").value
-        if self._dc_estimator:
-            nDC = self._getNumDriftCors()
-            drift_est = drift.AnchoredEstimator(self._emitter, self._se_stream._detector,
-                                                self._dc_estimator.roi.value,
-                                                self._dc_estimator.dwellTime.value)
-            pxTime += nDC * drift_est.estimateAcquisitionTime()
-        return 1.1 * pxTime * res
-
-    def _adjustHardwareSettings(self):
-        """
-        return img_time (0 < float): estimated time for a one acquisition (not integrated)
-               ninteg (int): Number of images to integrate to match the requested dwell time.
-        """
-        self._emitter.scale.value = (1, 1)
-        self._emitter.resolution.value = (1, 1)
-
-        px_time = self._tc_stream._getDetectorVA("dwellTime").value
-        # Re-adjust dwell time for number of drift corrections
-        if self._dc_estimator:
-            ninteg = max(self._getNumDriftCors(), 1)
-        else:
-            ninteg = 1
-        dwell_time = px_time / ninteg
-
-        logging.debug("Setting dwell time for ebeam and TC detector to %s "
-                      "to account for sub-pixel drift corrections.", dwell_time)
-        self._tc_stream._detector.dwellTime.value = dwell_time
-        self._emitter.dwellTime.value = dwell_time
-
-        # Order matters (a bit). At least, on the Tescan, only the "external" waits extra time to ensure
-        # a stable e-beam condition, so it should be done last.
-        if model.hasVA(self._emitter, "blanker") and self._emitter.blanker.value is None:
-            # When the e-beam is set to automatic blanker mode, it would switch on/off for every
-            # block of acquisition. This is not efficient, and can disrupt the e-beam. So we force
-            # "blanker" off while the acquisition is running.
-            self._orig_hw_values[self._emitter.blanker] = self._emitter.blanker.value
-            self._emitter.blanker.value = False
-
-        if model.hasVA(self._emitter, "external") and self._emitter.external.value is None:
-            # When the e-beam is set to automatic external mode, it would switch on/off for every
-            # block of acquisition. This is not efficient, and can disrupt the e-beam. So we force
-            # "external" while the acquisition is running.
-            self._orig_hw_values[self._emitter.external] = self._emitter.external.value
-            self._emitter.external.value = True
-
-        return px_time, ninteg
-
-    def _runAcquisition(self, future) -> Tuple[List[model.DataArray], Optional[Exception]]:
-        """
-        Overrides MultipleDetectorStream._runAcquisition. See that function for doc.
-        """
-        self._raw = []
-        self._anchor_raw = []
-
-        # Drift correction
-        if self._dc_estimator:
-            drift_est = drift.AnchoredEstimator(self._emitter, self._se_stream._detector,
-                                                self._dc_estimator.roi.value,
-                                                self._dc_estimator.dwellTime.value)
-            drift_est.acquire()
-        tot_dc_vect = [0, 0]
-
-        n = 0
-        se_data = []
-        tc_data = []
-        spot_pos = self._getSpotPositions()
-        tcdf = self._tc_stream._dataflow
-
+    def _estimateRawAcquisitionTime(self) -> float:
+        # Special because it has no readout rate and no exposureTime
         try:
-            img_time, ninteg = self._adjustHardwareSettings()
+            exp = self._sccd._getDetectorVA("dwellTime").value
+            dur_image = exp * 1.10 # 10% overhead
+            duration = numpy.prod(self.repetition.value) * dur_image
+            # Add the setup time
+            duration += self.SETUP_OVERHEAD
 
-            # Prepare the time-correlator: acquire one frame every time the SEM starts scanning.
-            # The SEM may scan multiple times for each CCD frame.
-            tcdf.synchronizedOn(self._trigger)
-            # Get the time-correlator ready to acquire
-            tcdf.subscribe(self._subscribers[-1])
+            return duration
 
-            start_t = time.time()
-
-            for px_idx in numpy.ndindex(*self.repetition.value[::-1]):
-                x, y = tuple(spot_pos[px_idx])
-                se_px_data = []
-                tc_px_data = []
-
-                # In case of multiple drift corrections per pixel, acquire for part of the dwell time and
-                # perform drift correction iteratively until full dwell time is reached.
-                for _ in range(ninteg):
-                    # Add total drift vector
-                    xcor = x - tot_dc_vect[0]
-                    ycor = y - tot_dc_vect[1]
-                    # Check if drift correction leads to an x,y position outside of scan region
-                    xclip, yclip = self._emitter.translation.clip((xcor, ycor))
-                    if (xclip, yclip) != (xcor, ycor):
-                        logging.error("Drift of %s px caused acquisition region out "
-                                      "of bounds: needed to scan spot at %s.", tot_dc_vect, (xcor, ycor))
-                    # Acquire image
-                    tc_i, se_i = self._acquireImage(xclip, yclip, img_time)
-                    tc_px_data.append(tc_i)
-                    se_px_data.append(se_i)
-                    logging.debug("Memory used = %d bytes", udriver.readMemoryUsage())
-                    # Perform drift correction
-                    if self._dc_estimator:
-                        try:
-                            # Temporarily switch the detector to a different event trigger, so that it
-                            # doesn't get triggered while the drift estimator is running (because it uses the
-                            # e-beam, which sends a startScan event)
-                            tcdf.synchronizedOn(self._tc_stream._detector.softwareTrigger)
-                            drift_est.acquire()
-                            dc_vect = drift_est.estimate()
-                            tot_dc_vect[0] += dc_vect[0]
-                            tot_dc_vect[1] += dc_vect[1]
-                        except Exception:
-                            logging.exception("Drift correction failed, will retry next pixel")
-                        tcdf.synchronizedOn(self._trigger)
-
-                n += 1
-                logging.info("Acquired %d out of %d pixels", n, numpy.prod(self.repetition.value))
-
-                # TODO: use ImageIntegrator for the image integration
-                # Sum up the partial data to get the full output for the pixel
-                dtype = tc_px_data[0].dtype
-                idt = numpy.iinfo(dtype)
-                pxsum = numpy.sum(tc_px_data, 0)
-                pxsum = numpy.minimum(pxsum, idt.max * numpy.ones(pxsum.shape))
-                tc_md = tc_px_data[0].metadata.copy()
-                try:
-                    tc_md[model.MD_DWELL_TIME] *= ninteg
-                except KeyError:
-                    logging.warning("No dwell time metadata in time-correlator data")
-                pxsum = model.DataArray(pxsum.astype(dtype), tc_md)
-                tc_data.append(pxsum)
-
-                # TODO: this is actually not really correct as the SEM data is "normalized", so the
-                # final data should be divided by ninteg. This is done correctly in ImageIntegrator.
-                pxsum = numpy.sum(se_px_data, 0)
-                pxsum = numpy.minimum(pxsum, idt.max * numpy.ones(pxsum.shape))
-                se_md = se_px_data[0].metadata.copy()
-                try:
-                    se_md[model.MD_DWELL_TIME] *= ninteg
-                except KeyError:
-                    logging.warning("No dwell time metadata in SEM data")
-                s = model.DataArray(pxsum, se_md)
-                se_data.append(s)
-
-                # Live update the setting stream with the new data
-                self._tc_stream._onNewData(self._tc_stream._dataflow, tc_data[-1])
-
-            dur = time.time() - start_t
-            logging.info("Acquisition completed in %g s -> %g s/frame", dur, dur / n)
-            tcdf.unsubscribe(self._subscribers[-1])
-            tcdf.synchronizedOn(None)
-
-            self._onCompletedData(0, se_data)
-            self._onCompletedData(1, tc_data)
-
-            if self._dc_estimator:
-                self._anchor_raw.append(self._assembleAnchorData(drift_est.raw))
-            if self._acq_state == CANCELLED:
-                raise CancelledError()
-        except CancelledError:
-            logging.info("Time correlator stream cancelled")
-            with self._acq_lock:
-                self._acq_state = FINISHED
-            raise  # Just don't log the exception
         except Exception:
-            logging.exception("Failure during Correlator acquisition")
-            # TODO: once live data is supported, return the partial data
-            raise
-        finally:
-            for s, sub in zip(self._streams, self._subscribers):
-                s._dataflow.unsubscribe(sub)
-            tcdf.synchronizedOn(None)  # In case of exception
+            logging.exception("Exception while estimating acquisition time of %s", self.name.value)
+            return self.SETUP_OVERHEAD
 
-            for s in self._streams:
-                s._unlinkHwVAs()
-            self._restoreHardwareSettings()
+    def _assembleLiveData(self, n: int, raw_data: model.DataArray,
+                          px_idx: Tuple[int, int], px_pos: Tuple[float, float],
+                          rep: Tuple[int, int], pol_idx: int = 0,
+                          pos_center: Tuple[float, float] = None) -> None:
+        """
+        See MultipleDetectorStream._assembleLiveData() for the docstring.
+        """
+        if n != self._ccd_idx:
+            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx, pos_center)
 
-            logging.debug("TC acquisition finished")
-            self._acq_done.set()
-
-        return self.raw, None
-
-    def _acquireImage(self, x: float, y: float, img_time: float) -> Tuple[model.DataArray, model.DataArray]:
-        try:
-            for ce in self._acq_complete:
-                ce.clear()
-
-            self._emitter.translation.value = (x, y)
-            # checks the hardware has accepted it
-            trans = self._emitter.translation.value
-            if math.hypot(x - trans[0], y - trans[1]) > 1e-3:
-                logging.warning("Ebeam translation is %s instead of requested %s.", trans, (x, y))
-
-            self._acq_min_date = time.time()
-
-            # Start "all" the detectors but the time-correlator => start the e-beam
-            for s, sub in zip(self._streams[:-1], self._subscribers[:-1]):
-                s._dataflow.subscribe(sub)
-
-            # Wait for detector to acquire image
-            for i, s in enumerate(self._streams):
-                timeout = 2.5 * img_time + 3
-                if not self._acq_complete[i].wait(timeout):
-                    raise TimeoutError(f"Timeout waiting for stream {i}")
-            if self._acq_state == CANCELLED:
-                raise CancelledError()
-            tc_data, se_data = self._acq_data[-1][-1], self._acq_data[0][-1]
-            return tc_data, se_data
-        finally:
-            for s, sub in zip(self._streams[:-1], self._subscribers[:-1]):
-                s._dataflow.unsubscribe(sub)
-
-    def _onCompletedData(self, n, raw_das):
-        if n != 1:  # It's SEM data => no special way to treat it
-            return super(SEMTemporalMDStream, self)._onCompletedData(n, raw_das)
-
-        md = raw_das[0].metadata.copy()
-
-        # The time-correlator data is of shape 1, 65535 (XT). So the first
+        # The time-correlator data is of shape 1,T. So the first
         # dimension can always be discarded and the second dimension is T.
-        # All the data is scanned in Y(slow)/X(fast) order.
-        # This will not work anymore if we include fuzzing.
-        rep = self.repetition.value
-        das = numpy.array(raw_das)
-        shape = das.shape  # N1T = rep[1] * rep[0], 1, detector.resolution[0]
-        das.shape = (1, 1, rep[1], rep[0], shape[-1])  # Add CZ == 11 + separate YX
-        das = numpy.rollaxis(das, 4, 1)  # Move T: CZYXT -> CTZYX
-        md[MD_DIMS] = "CTZYX"
+        time_shape = raw_data.shape[-1]
 
-        # Compute metadata based on SEM metadata
-        sem_md = self._raw[0].metadata  # _onCompletedData() should be called in order
-        md[MD_POS] = sem_md[MD_POS]
-        md[MD_PIXEL_SIZE] = sem_md[MD_PIXEL_SIZE]
-        md[MD_DESCRIPTION] = self._streams[n].name.value
+        # the whole data array is calculated once, when we receive the very first image
+        if pol_idx > len(self._live_data[n]) - 1:
+            # New polarization => new DataArray
+            md = raw_data.metadata.copy()
+            pxs = self._pxs
+            center = pos_center
+            rotation = self.rotation.value
+            md.update({MD_POS: center,
+                       MD_PIXEL_SIZE: pxs,
+                       MD_ROTATION: rotation,
+                       MD_DIMS: "CTZYX",
+                       MD_DESCRIPTION: self._streams[n].name.value})
 
-        das = model.DataArray(das, md)
-        self._raw.append(das)
+            # Shape of temporal data = 1T1YX
+            da = numpy.zeros(shape=(1, time_shape, 1, rep[1], rep[0]), dtype=raw_data.dtype)
+            self._live_data[n].append(model.DataArray(da, md))
 
-    def _getNumDriftCors(self):
-        """
-        Returns the number of drift corrections per pixel
-        """
-        if not self._dc_estimator:
-            return 0
-        dc_period = self._dc_estimator.period.value
-        tc_dwell_time = self._tc_stream._getDetectorVA("dwellTime").value
-        nDC = int(tc_dwell_time / dc_period)
-        # If the drift correction period is slightly larger than the dwell time, perform
-        # one drift correction per pixel, if it's much larger don't perform drift correction at all.
-        # TODO: go back to normal behaviour (like other streams) if dc_period > tc_dwell_time
-        if 0.1 < tc_dwell_time / dc_period < 1:
-            nDC = 1
-        return nDC
+        # Detector image has a shape of 1,T => copy T into second dimension
+        self._live_data[n][pol_idx][0, :, 0, px_idx[0], px_idx[1]] = raw_data.reshape(time_shape)
+
+    #
+    # def _onCompletedData(self, n, raw_das):
+    #     if n != 1:  # It's SEM data => no special way to treat it
+    #         return super(SEMTemporalMDStream, self)._onCompletedData(n, raw_das)
+    #
+    #     md = raw_das[0].metadata.copy()
+    #
+    #     # The time-correlator data is of shape 1, 65535 (XT). So the first
+    #     # dimension can always be discarded and the second dimension is T.
+    #     # All the data is scanned in Y(slow)/X(fast) order.
+    #     # This will not work anymore if we include fuzzing.
+    #     rep = self.repetition.value
+    #     das = numpy.array(raw_das)
+    #     shape = das.shape  # N1T = rep[1] * rep[0], 1, detector.resolution[0]
+    #     das.shape = (1, 1, rep[1], rep[0], shape[-1])  # Add CZ == 11 + separate YX
+    #     das = numpy.rollaxis(das, 4, 1)  # Move T: CZYXT -> CTZYX
+    #     md[MD_DIMS] = "CTZYX"
+    #
+    #     # Compute metadata based on SEM metadata
+    #     sem_md = self._raw[0].metadata  # _onCompletedData() should be called in order
+    #     md[MD_POS] = sem_md[MD_POS]
+    #     md[MD_PIXEL_SIZE] = sem_md[MD_PIXEL_SIZE]
+    #     md[MD_DESCRIPTION] = self._streams[n].name.value
+    #
+    #     das = model.DataArray(das, md)
+    #     self._raw.append(das)
+    #
+
+
+    #
+    # # TODO: implement multiple dwell time corrections per pixel in SEMCCDStream, so we don't
+    # # have duplicate code and a correct implementation that works with leeches and other features.
+    #
+    # def __init__(self, name, streams):
+    #     """
+    #     streams (list of Streams): in addition to the requirements of
+    #       MultipleDetectorStream, there should be precisely two streams. The
+    #       first one MUST be controlling the SEM e-beam, while the last stream
+    #       must be a time correlator stream.
+    #     """
+    #     if streams[0]._detector.role not in EBEAM_DETECTORS:
+    #         raise ValueError("First stream detector %s doesn't control e-beam" %
+    #                          (streams[0]._detector.name,))
+    #     if streams[1]._detector.role != "time-correlator":
+    #         raise ValueError("Second stream detector needs to have 'time-correlator' " +
+    #                          "as its role, not %s." % streams[1]._detector.role)
+    #
+    #     super().__init__(name, streams)
+    #
+    #     self._se_stream = streams[0]
+    #     self._tc_stream = streams[1]
+    #     self._trigger = self._emitter.startScan  # to acquire a CCD image every time the SEM starts a new scan
+    #
+    # def _estimateRawAcquisitionTime(self):
+    #     res = numpy.prod(self._tc_stream.repetition.value)
+    #     pxTime = self._tc_stream._getDetectorVA("dwellTime").value
+    #     if self._dc_estimator:
+    #         nDC = self._getNumDriftCors()
+    #         drift_est = drift.AnchoredEstimator(self._emitter, self._se_stream._detector,
+    #                                             self._dc_estimator.roi.value,
+    #                                             self._dc_estimator.dwellTime.value)
+    #         pxTime += nDC * drift_est.estimateAcquisitionTime()
+    #     return 1.1 * pxTime * res
+    #
+    # def _adjustHardwareSettings(self):
+    #     """
+    #     return img_time (0 < float): estimated time for a one acquisition (not integrated)
+    #            ninteg (int): Number of images to integrate to match the requested dwell time.
+    #     """
+    #     self._emitter.scale.value = (1, 1)
+    #     self._emitter.resolution.value = (1, 1)
+    #
+    #     px_time = self._tc_stream._getDetectorVA("dwellTime").value
+    #     # Re-adjust dwell time for number of drift corrections
+    #     if self._dc_estimator:
+    #         ninteg = max(self._getNumDriftCors(), 1)
+    #     else:
+    #         ninteg = 1
+    #     dwell_time = px_time / ninteg
+    #
+    #     logging.debug("Setting dwell time for ebeam and TC detector to %s "
+    #                   "to account for sub-pixel drift corrections.", dwell_time)
+    #     self._tc_stream._detector.dwellTime.value = dwell_time
+    #     self._emitter.dwellTime.value = dwell_time
+    #
+    #     # Order matters (a bit). At least, on the Tescan, only the "external" waits extra time to ensure
+    #     # a stable e-beam condition, so it should be done last.
+    #     if model.hasVA(self._emitter, "blanker") and self._emitter.blanker.value is None:
+    #         # When the e-beam is set to automatic blanker mode, it would switch on/off for every
+    #         # block of acquisition. This is not efficient, and can disrupt the e-beam. So we force
+    #         # "blanker" off while the acquisition is running.
+    #         self._orig_hw_values[self._emitter.blanker] = self._emitter.blanker.value
+    #         self._emitter.blanker.value = False
+    #
+    #     if model.hasVA(self._emitter, "external") and self._emitter.external.value is None:
+    #         # When the e-beam is set to automatic external mode, it would switch on/off for every
+    #         # block of acquisition. This is not efficient, and can disrupt the e-beam. So we force
+    #         # "external" while the acquisition is running.
+    #         self._orig_hw_values[self._emitter.external] = self._emitter.external.value
+    #         self._emitter.external.value = True
+    #
+    #     return px_time, ninteg
+    #
+    # def _runAcquisition(self, future) -> Tuple[List[model.DataArray], Optional[Exception]]:
+    #     """
+    #     Overrides MultipleDetectorStream._runAcquisition. See that function for doc.
+    #     """
+    #     self._raw = []
+    #     self._anchor_raw = []
+    #
+    #     # Drift correction
+    #     if self._dc_estimator:
+    #         drift_est = drift.AnchoredEstimator(self._emitter, self._se_stream._detector,
+    #                                             self._dc_estimator.roi.value,
+    #                                             self._dc_estimator.dwellTime.value)
+    #         drift_est.acquire()
+    #     tot_dc_vect = [0, 0]
+    #
+    #     n = 0
+    #     se_data = []
+    #     tc_data = []
+    #     spot_pos = self._getSpotPositions()
+    #     tcdf = self._tc_stream._dataflow
+    #
+    #     try:
+    #         img_time, ninteg = self._adjustHardwareSettings()
+    #
+    #         # Prepare the time-correlator: acquire one frame every time the SEM starts scanning.
+    #         # The SEM may scan multiple times for each CCD frame.
+    #         tcdf.synchronizedOn(self._trigger)
+    #         # Get the time-correlator ready to acquire
+    #         tcdf.subscribe(self._subscribers[-1])
+    #
+    #         start_t = time.time()
+    #
+    #         for px_idx in numpy.ndindex(*self.repetition.value[::-1]):
+    #             x, y = tuple(spot_pos[px_idx])
+    #             se_px_data = []
+    #             tc_px_data = []
+    #
+    #             # In case of multiple drift corrections per pixel, acquire for part of the dwell time and
+    #             # perform drift correction iteratively until full dwell time is reached.
+    #             for _ in range(ninteg):
+    #                 # Add total drift vector
+    #                 xcor = x - tot_dc_vect[0]
+    #                 ycor = y - tot_dc_vect[1]
+    #                 # Check if drift correction leads to an x,y position outside of scan region
+    #                 xclip, yclip = self._emitter.translation.clip((xcor, ycor))
+    #                 if (xclip, yclip) != (xcor, ycor):
+    #                     logging.error("Drift of %s px caused acquisition region out "
+    #                                   "of bounds: needed to scan spot at %s.", tot_dc_vect, (xcor, ycor))
+    #                 # Acquire image
+    #                 tc_i, se_i = self._acquireImage(xclip, yclip, img_time)
+    #                 tc_px_data.append(tc_i)
+    #                 se_px_data.append(se_i)
+    #                 logging.debug("Memory used = %d bytes", udriver.readMemoryUsage())
+    #                 # Perform drift correction
+    #                 if self._dc_estimator:
+    #                     try:
+    #                         # Temporarily switch the detector to a different event trigger, so that it
+    #                         # doesn't get triggered while the drift estimator is running (because it uses the
+    #                         # e-beam, which sends a startScan event)
+    #                         tcdf.synchronizedOn(self._tc_stream._detector.softwareTrigger)
+    #                         drift_est.acquire()
+    #                         dc_vect = drift_est.estimate()
+    #                         tot_dc_vect[0] += dc_vect[0]
+    #                         tot_dc_vect[1] += dc_vect[1]
+    #                     except Exception:
+    #                         logging.exception("Drift correction failed, will retry next pixel")
+    #                     tcdf.synchronizedOn(self._trigger)
+    #
+    #             n += 1
+    #             logging.info("Acquired %d out of %d pixels", n, numpy.prod(self.repetition.value))
+    #
+    #             # TODO: use ImageIntegrator for the image integration
+    #             # Sum up the partial data to get the full output for the pixel
+    #             dtype = tc_px_data[0].dtype
+    #             idt = numpy.iinfo(dtype)
+    #             pxsum = numpy.sum(tc_px_data, 0)
+    #             pxsum = numpy.minimum(pxsum, idt.max * numpy.ones(pxsum.shape))
+    #             tc_md = tc_px_data[0].metadata.copy()
+    #             try:
+    #                 tc_md[model.MD_DWELL_TIME] *= ninteg
+    #             except KeyError:
+    #                 logging.warning("No dwell time metadata in time-correlator data")
+    #             pxsum = model.DataArray(pxsum.astype(dtype), tc_md)
+    #             tc_data.append(pxsum)
+    #
+    #             # TODO: this is actually not really correct as the SEM data is "normalized", so the
+    #             # final data should be divided by ninteg. This is done correctly in ImageIntegrator.
+    #             pxsum = numpy.sum(se_px_data, 0)
+    #             pxsum = numpy.minimum(pxsum, idt.max * numpy.ones(pxsum.shape))
+    #             se_md = se_px_data[0].metadata.copy()
+    #             try:
+    #                 se_md[model.MD_DWELL_TIME] *= ninteg
+    #             except KeyError:
+    #                 logging.warning("No dwell time metadata in SEM data")
+    #             s = model.DataArray(pxsum, se_md)
+    #             se_data.append(s)
+    #
+    #             # Live update the setting stream with the new data
+    #             self._tc_stream._onNewData(self._tc_stream._dataflow, tc_data[-1])
+    #
+    #         dur = time.time() - start_t
+    #         logging.info("Acquisition completed in %g s -> %g s/frame", dur, dur / n)
+    #         tcdf.unsubscribe(self._subscribers[-1])
+    #         tcdf.synchronizedOn(None)
+    #
+    #         self._onCompletedData(0, se_data)
+    #         self._onCompletedData(1, tc_data)
+    #
+    #         if self._dc_estimator:
+    #             self._anchor_raw.append(self._assembleAnchorData(drift_est.raw))
+    #         if self._acq_state == CANCELLED:
+    #             raise CancelledError()
+    #     except CancelledError:
+    #         logging.info("Time correlator stream cancelled")
+    #         with self._acq_lock:
+    #             self._acq_state = FINISHED
+    #         raise  # Just don't log the exception
+    #     except Exception:
+    #         logging.exception("Failure during Correlator acquisition")
+    #         # TODO: once live data is supported, return the partial data
+    #         raise
+    #     finally:
+    #         for s, sub in zip(self._streams, self._subscribers):
+    #             s._dataflow.unsubscribe(sub)
+    #         tcdf.synchronizedOn(None)  # In case of exception
+    #
+    #         for s in self._streams:
+    #             s._unlinkHwVAs()
+    #         self._restoreHardwareSettings()
+    #
+    #         logging.debug("TC acquisition finished")
+    #         self._acq_done.set()
+    #
+    #     return self.raw, None
+    #
+    # def _acquireImage(self, x: float, y: float, img_time: float) -> Tuple[model.DataArray, model.DataArray]:
+    #     try:
+    #         for ce in self._acq_complete:
+    #             ce.clear()
+    #
+    #         self._emitter.translation.value = (x, y)
+    #         # checks the hardware has accepted it
+    #         trans = self._emitter.translation.value
+    #         if math.hypot(x - trans[0], y - trans[1]) > 1e-3:
+    #             logging.warning("Ebeam translation is %s instead of requested %s.", trans, (x, y))
+    #
+    #         self._acq_min_date = time.time()
+    #
+    #         # Start "all" the detectors but the time-correlator => start the e-beam
+    #         for s, sub in zip(self._streams[:-1], self._subscribers[:-1]):
+    #             s._dataflow.subscribe(sub)
+    #
+    #         # Wait for detector to acquire image
+    #         for i, s in enumerate(self._streams):
+    #             timeout = 2.5 * img_time + 3
+    #             if not self._acq_complete[i].wait(timeout):
+    #                 raise TimeoutError(f"Timeout waiting for stream {i}")
+    #         if self._acq_state == CANCELLED:
+    #             raise CancelledError()
+    #         tc_data, se_data = self._acq_data[-1][-1], self._acq_data[0][-1]
+    #         return tc_data, se_data
+    #     finally:
+    #         for s, sub in zip(self._streams[:-1], self._subscribers[:-1]):
+    #             s._dataflow.unsubscribe(sub)
+    #
+    # def _onCompletedData(self, n, raw_das):
+    #     if n != 1:  # It's SEM data => no special way to treat it
+    #         return super(SEMTemporalMDStream, self)._onCompletedData(n, raw_das)
+    #
+    #     md = raw_das[0].metadata.copy()
+    #
+    #     # The time-correlator data is of shape 1, 65535 (XT). So the first
+    #     # dimension can always be discarded and the second dimension is T.
+    #     # All the data is scanned in Y(slow)/X(fast) order.
+    #     # This will not work anymore if we include fuzzing.
+    #     rep = self.repetition.value
+    #     das = numpy.array(raw_das)
+    #     shape = das.shape  # N1T = rep[1] * rep[0], 1, detector.resolution[0]
+    #     das.shape = (1, 1, rep[1], rep[0], shape[-1])  # Add CZ == 11 + separate YX
+    #     das = numpy.rollaxis(das, 4, 1)  # Move T: CZYXT -> CTZYX
+    #     md[MD_DIMS] = "CTZYX"
+    #
+    #     # Compute metadata based on SEM metadata
+    #     sem_md = self._raw[0].metadata  # _onCompletedData() should be called in order
+    #     md[MD_POS] = sem_md[MD_POS]
+    #     md[MD_PIXEL_SIZE] = sem_md[MD_PIXEL_SIZE]
+    #     md[MD_DESCRIPTION] = self._streams[n].name.value
+    #
+    #     das = model.DataArray(das, md)
+    #     self._raw.append(das)
+    #
+    # def _getNumDriftCors(self):
+    #     """
+    #     Returns the number of drift corrections per pixel
+    #     """
+    #     if not self._dc_estimator:
+    #         return 0
+    #     dc_period = self._dc_estimator.period.value
+    #     tc_dwell_time = self._tc_stream._getDetectorVA("dwellTime").value
+    #     nDC = int(tc_dwell_time / dc_period)
+    #     # If the drift correction period is slightly larger than the dwell time, perform
+    #     # one drift correction per pixel, if it's much larger don't perform drift correction at all.
+    #     # TODO: go back to normal behaviour (like other streams) if dc_period > tc_dwell_time
+    #     if 0.1 < tc_dwell_time / dc_period < 1:
+    #         nDC = 1
+    #     return nDC
 
 
 class SEMAngularSpectrumMDStream(SEMCCDMDStream):
@@ -4089,20 +4187,6 @@ class SEMAngularSpectrumMDStream(SEMCCDMDStream):
             raw_data = raw_data[::-1, ...]  # invert C
         self._live_data[n][pol_idx][:,:, 0, px_idx[0], px_idx[1]] = raw_data.reshape(spec_res, angle_res)
 
-    def _assembleFinalData(self, n, data):
-        """
-        :param n: (int) number of the current stream which is assembled into ._raw
-        :param data: all acquired data of the stream
-        This function post-processes/organizes the data for a stream and exports it into ._raw.
-        """
-        if n != self._ccd_idx:
-            return super()._assembleFinalData(n, data)
-
-        if len(data) > 1:  # Multiple polarizations => keep them separated, and add the polarization name to the description
-            for d in data:
-                d.metadata[model.MD_DESCRIPTION] += " " + d.metadata[model.MD_POL_MODE]
-
-        self._raw.extend(data)
 
 STREAK_CCD_INTENSITY_MAX_PX_COUNT = 10  # px, max number of pixels allowed above the threshold
 
@@ -4248,6 +4332,7 @@ class SEMARMDStream(SEMCCDMDStream):
 
         # Add all the DataArrays of the AR independently
         self._raw.extend(data)
+
 
 # TODO: ideally it should inherit from FluoStream
 class ScannedFluoMDStream(MultipleDetectorStream):
@@ -4785,16 +4870,23 @@ class SEMCCDAcquirer:
         # Note: if the stream has "local VA" (ie, copy of the component VA), then it is assumed that
         # the component VA has already been set to the correct value. (ie, linkHwVAs() has been called)
 
+        if model.hasVA(self._mdstream._ccd, "exposureTime"):
+            expTime = self._mdstream._ccd.exposureTime
+        elif model.hasVA(self._mdstream._ccd, "dwellTime"):
+            expTime = self._mdstream._ccd.dwellTime
+        else:
+            raise ValueError(f"No exposureTime or dwellTime control on {self._mdstream._ccd.name}")
+
         if self._mdstream._integrationTime:
             integration_time = self._mdstream._integrationTime.value
-            exp_time = self._mdstream._ccd.exposureTime.value
+            exp_time = expTime.value
             if max_snapshot_duration is None:
                 max_snapshot_duration = exp_time
             else:
                 max_snapshot_duration = min(max_snapshot_duration, exp_time)
         else:
             # CCD stream has exposure time
-            exp_time = self._mdstream._ccd.exposureTime.value
+            exp_time = expTime.value
             integration_time = exp_time
 
             if max_snapshot_duration is None:
@@ -4805,16 +4897,16 @@ class SEMCCDAcquirer:
             integration_count = math.ceil(integration_time / max_snapshot_duration)
             exp_time = integration_time / integration_count
             # set the exp time on the HW VA (which might adjust it)
-            self._mdstream._ccd.exposureTime.value = self._mdstream._ccd.exposureTime.clip(exp_time)
+            expTime.value = expTime.clip(exp_time)
             # calculate the integrationCount using the actual value from the HW, in case it was
-            # modify by a lot (unlikely)
-            exp_time = self._mdstream._ccd.exposureTime.value
+            # modified by a lot (unlikely)
+            exp_time = expTime.value
             integration_count = math.ceil(integration_time / exp_time)
             logging.debug("Using integration of %d snapshots of %s s per pixel",
                           integration_count, exp_time)
         else:
             exp_time = integration_time
-            self._mdstream._ccd.exposureTime.value = exp_time
+            expTime.value = exp_time
             integration_count = 1
 
         fuzzing = (hasattr(self._mdstream, "fuzzing") and self._mdstream.fuzzing.value)
@@ -4861,8 +4953,11 @@ class SEMCCDAcquirer:
         if hasVA(self._mdstream._ccd, "frameDuration"): # FIXME: it seems it can be late to update
             frame_duration = self._mdstream._ccd.frameDuration.value
         else:
-            ccd_res = self._mdstream._sccd._getDetectorVA("resolution").value
-            readout = numpy.prod(ccd_res) / self._mdstream._sccd._getDetectorVA("readoutRate").value
+            if model.hasVA(self._mdstream._sccd, "readoutRate"):
+                ccd_res = self._mdstream._sccd.resolution.value
+                readout = numpy.prod(ccd_res) / self._mdstream._sccd.readoutRate.value
+            else:
+                readout = 0
             frame_duration = exp_time + readout  # s
 
         if fuzzing:
@@ -5126,6 +5221,7 @@ class SEMCCDAcquirer:
 
         return ret_das
 
+
 class SEMCCDAcquirerVector(SEMCCDAcquirer):
     """
     Acquirer for SEM+CCD detectors, which can be used to acquire images using the e-beam to scan,
@@ -5339,6 +5435,10 @@ class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
                       self._mdstream._emitter.resolution.value,
                       self._mdstream._emitter.scale.value)
 
+        # TODO: vector scanning: compute scan path and pixelTTL (with rotation, but no fuzzing or integration for now)
+        # scan.generate_scan_vector
+
+
         # TODO: to support drift correction (leeches), need to use the leech, as in SEMMDStream._runAcquisition
         # and it will need to update the ebeam setting block per block (of variable size)
 
@@ -5350,14 +5450,7 @@ class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
 
     # TODO: move to base class
     def restore_hardware(self) -> None:
-        """
-        Restore the VAs of the hardware to their original values before the acquisition started
-        """
-        for va, value in self._orig_hw_values.items():
-            try:
-                va.value = value
-            except Exception:
-                logging.exception("Failed to restore VA %s to %s", va, value)
+        super().restore_hardware()
 
     def prepare_acquisition(self) -> None:
         """
@@ -5380,10 +5473,13 @@ class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
         self._mdstream._ccd_df.synchronizedOn(None)
         self._mdstream._df0.synchronizedOn(None)
 
+        self._mdstream._emitter.scanPath.value = None  # disable vector scanning
+
         # Empty the queues (in case of error they might still contain some data)
         for q in self._mdstream._acq_data_queue:
             while not q.empty():
                 q.get()
+
 
     def start_spatial_acquisition(self, pol_idx: Tuple[int, int]) -> None:
         # TODO: create the _hwsync_subscribers and  _acq_data_queue in this class.
@@ -5493,5 +5589,3 @@ class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
                 n, now - self._start_area_t, self.snapshot_time * n)
 
         return ret_das
-
-

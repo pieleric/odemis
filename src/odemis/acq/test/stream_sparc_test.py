@@ -1937,6 +1937,7 @@ class SPARC2StreakCameraTestCase(BaseSPARCTestCase):
     capabilities = {"ebic", "streakcam"}  # For speed, skip: "cl", "ar", "ccd"
 
     def setUp(self):
+        super().setUp()
         # Wait a bit for the simulator to be "ready" again (as it's not a very good simulator)
         # Otherwise, if immediately stopping & starting, the simulator may generate an old image,
         # very early.
@@ -1985,7 +1986,7 @@ class SPARC2StreakCameraTestCase(BaseSPARCTestCase):
         # .image should be a 2D temporal spectrum
         self.assertEqual(self._images[-1].shape[1::-1], streaks.detResolution.value)
         # check if metadata is correctly stored
-        md = self._image[-1].metadata
+        md = self._images[-1].metadata
         self.assertIn(model.MD_WL_LIST, md)
         self.assertIn(model.MD_TIME_LIST, md)
 
@@ -3531,7 +3532,7 @@ class TimeCorrelatorTestCase(BaseSPARCTestCase):
     Tests the SEMTemporalMDStream.
     """
     simulator_config = TIME_CORRELATOR_CONFIG
-    capabilities = {"ar", "time-correlator"}
+    capabilities = {"time-correlator"}  # Skip: "ar", "spec", "cl"
 
     @classmethod
     def setUpClass(cls):

@@ -1362,7 +1362,7 @@ class SEMCCDMDStream(MultipleDetectorStream):
                 #return self._runAcquisitionEbeamVector(future)
             else:
                 assert self.rotation.value == 0  # Rotation not supported for this acquisition
-                acquirer = SEMCCDAcquirer(self)
+                acquirer = SEMCCDAcquirerRectangle(self)
                 return self._genericRunAcquisition(future, acquirer)
                 #return self._runAcquisitionEbeamRectangle(future)
 
@@ -4510,6 +4510,23 @@ class SEMCCDAcquirer(abc.ABC):
         """
         :param mdstream: (SEMCCDMDStream) the stream to acquire from
         """
+        self._mdstream = mdstream
+
+        # Values to be initialized when calling prepare_hardware()
+        self.integration_count = 1  # number of snapshot acquisitions to do per pixel
+        self.snapshot_time = 0.0  # time in s for one snapshot acquisition
+
+        self.pxs = self._mdstream._getPixelSize() # physical size a whole pixel in m (X,Y)
+        self._rep = self._mdstream.repetition.value # number of pixels in the spatial image (of the CL data)
+        self.pos_center = None  # position of the center of the spatial acquisition in physical coordinates in m (X,Y)
+
+        # the coordinates (X,Y) of each point scanned (2D index) in px relative to the center of the FoV
+        # Computed by _prepare_spot_positions()
+        self._spot_pos = None  # numpy array  (Y,X,2)
+
+        # TODO: remove from md_stream
+        # original values of the hardware VAs to be restored after acquisition
+        self._orig_hw_values: Dict[model.VigilantAttribute, Any] = {}  # VA -> original value
 
 
     def restore_hardware(self) -> None:
@@ -4522,6 +4539,101 @@ class SEMCCDAcquirer(abc.ABC):
             except Exception:
                 logging.exception("Failed to restore VA %s to %s", va, value)
 
+    def _prepare_spot_positions(self) -> None:
+        """
+        Compute the spot positions (in scanner coordinates) and prepare for calculation of
+        position in sample coordinates. Also compute center position in sample coordinates.
+        """
+        self.pos_center = self._mdstream._getCenterPositionPhys()  # Independent of rotation
+
+        rep = self._rep
+        roi = self._mdstream.roi.value
+        rotation = self._mdstream.rotation.value
+        # Use generate_scan_vector() with no dwell time, to not add margin.
+        # This returns the positions of the center of each pixel, in a "flat" vector, but as
+        # it is scanned with X fast, and Y slow, it's easy to recreate the 2 dimensions.
+        pos_flat, margin, md_cor = scan.generate_scan_vector(self._mdstream._emitter,
+                                                             rep, roi, rotation,
+                                                             dwell_time=None)
+        assert margin == 0
+        self._spot_pos = pos_flat.reshape((rep[1], rep[0], 2))
+
+        # Transformation from the RoI pixel index to physical (sample) coordinates
+        self._scale_px_to_phys = numpy.array([[self.pxs[0], 0],
+                                              [0, -self.pxs[1]]])  # Y is inverted in the physical coordinates
+        ct = math.cos(rotation)
+        st = math.sin(rotation)
+        self._rotation_px_to_phys = numpy.array([(ct, -st), (st, ct)])
+        center_rot_px = (numpy.array(self._rep) - 1) / 2
+        self._center_rot_phys = self._scale_px_to_phys @ center_rot_px
+
+    def prepare_acquisition(self) -> None:
+        """
+        Called just before the acquisition starts, after the leeches have been initialized.
+        """
+        self._prepare_spot_positions()
+
+    def terminate_acquisition(self) -> None:
+        """
+        Stop and clean-up the entire acquisition
+        """
+        pass
+
+    def start_spatial_acquisition(self, pol_idx: Tuple[int, int]) -> None:
+        """
+        Called at the beginning of a new spatial acquisition
+        :param pol_idx: polarization index for which this spatial acquisition is run
+        """
+        pass
+
+    def complete_spatial_acquisition(self, pol_idx) -> List[Optional[model.DataArray]]:
+        """
+        Called at the end of a spatial acquisition
+        :param pol_idx:
+        :return: The DataArrays newly acquired, for the whole spatial acquisiton, per stream.
+         If the data was received per snapshot, then None is returned instead of a DataArray.
+        """
+        return [None for _ in self._mdstream._streams]  # No data
+
+    def start_pixel_acquisition(self, px_idx) -> Tuple[float, float]:
+        """
+        Called just before a pixel acquisition starts. It encompasses multiple snapshot acquisitions.
+        :param px_idx: Y, X
+        :return: the "ideal" physical coordinates of the pixel on the sample (assuming no drift) (X, Y) in m
+        """
+        # Convert from px to m (with Y inverted), relative to the top-left
+        px_pos_m = self._scale_px_to_phys @ px_idx[::-1]
+        # Rotation around the center of the RoI
+        px_pos_rot = self._rotation_px_to_phys @ (px_pos_m - self._center_rot_phys)
+        # Shift by the position of the RoI in the sample coordinates
+        px_pos = px_pos_rot + numpy.array(self.pos_center)
+        px_pos = tuple(px_pos)
+
+        logging.debug("Pixel position %s in physical coordinates: %s", px_idx[::-1], px_pos)
+        return px_pos
+
+    def pause_pixel_acquisition(self) -> None:
+        """
+        Called just before running the leeches
+        """
+        pass
+
+    def resume_pixel_acquisition(self) -> None:
+        """
+        Called just after running the leeches
+        """
+        pass
+
+    def acquire_one_snapshot(self, n: int, px_idx: Tuple[int, int]) -> List[Optional[model.DataArray]]:
+        """
+        Acquires an image from the detector, and also the data from the other streams.
+        :param n: Number of points (pixel/ebeam positions) acquired so far.
+        :param px_idx: Current scanning position of ebeam (Y, X)
+        :return: the acquired data for each stream. If no data was received for a given stream,
+        then None is provided.
+        """
+        raise NotImplementedError("Snapshot acquisition must be implemented by child class")
+
 
 class SEMCCDAcquirerRectangle(SEMCCDAcquirer):
     """
@@ -4533,26 +4645,15 @@ class SEMCCDAcquirerRectangle(SEMCCDAcquirer):
         """
         :param mdstream: (SEMCCDMDStream) the stream to acquire from
         """
-        self._mdstream = mdstream
+        super().__init__(mdstream)
 
-        # Values to be initialized when calling prepare_hardware()
-        self.integration_count = 1  # number of snapshot acquisitions to do per pixel
-        self.snapshot_time = 0.0  # time in s for one snapshot acquisition
         self.sem_time = 0.0  # time in s for one SEM acquisition during a snapshot (equal or shorter to the snapshot time)
-
-        # TODO: remove from md_stream
-        # original values of the hardware VAs to be restored after acquisition
-        self._orig_hw_values: Dict[model.VigilantAttribute, Any] = {}  # VA -> original value
-
-        self.pxs = self._mdstream._getPixelSize() # physical size a whole pixel in m (X,Y)
-        self._rep = self._mdstream.repetition.value # number of pixels in the spatial image (of the CL data)
         self.tile_size = None  # number of sub-pixels in the SEM spatial image (X,Y) (= 1,1 if no fuzzing)
 
-        # the coordinates (X,Y) of each point scanned (2D index) in px relative to the center of the FoV
-        self._spot_pos = None  # numpy array  (Y,X,2)
-        self.pos_center = None  # position of the center of the spatial acquisition in physical coordinates in m (X,Y)
-
         # TODO: assert rotation == 0 (on the SEMCCDAcquirerRectangle, or whatever is the class for standard scanner)
+        # How to not do that on child classes?
+        # if mdstream.rotation.value != 0:
+        #     raise ValueError("scanner rotation is not supported")
 
     def prepare_hardware(self, max_snapshot_duration: Optional[float] = None) -> None:
         """
@@ -4691,41 +4792,6 @@ class SEMCCDAcquirerRectangle(SEMCCDAcquirer):
         self.snapshot_time = frame_duration
         self.integration_count = integration_count
 
-    def _prepare_spot_positions(self) -> None:
-        """
-        Compute the spot positions (in scanner coordinates) and prepare for calculation of
-        position in sample coordinates. Also compute center position in sample coordinates.
-
-        """
-        self.pos_center = self._mdstream._getCenterPositionPhys()  # Independent of rotation
-
-        rep = self._rep
-        roi = self._mdstream.roi.value
-        rotation = self._mdstream.rotation.value
-        # Use generate_scan_vector() with no dwell time, to not add margin.
-        # This returns the positions of the center of each pixel, in a "flat" vector, but as
-        # it is scanned with X fast, and Y slow, it's easy to recreate the 2 dimensions.
-        pos_flat, margin, md_cor = scan.generate_scan_vector(self._mdstream._emitter,
-                                                             rep, roi, rotation,
-                                                             dwell_time=None)
-        assert margin == 0
-        self._spot_pos = pos_flat.reshape((rep[1], rep[0], 2))
-
-        # Transformation from the RoI pixel index to physical (sample) coordinates
-        self._scale_px_to_phys = numpy.array([[self.pxs[0], 0],
-                                              [0, -self.pxs[1]]])  # Y is inverted in the physical coordinates
-        ct = math.cos(rotation)
-        st = math.sin(rotation)
-        self._rotation_px_to_phys = numpy.array([(ct, -st), (st, ct)])
-        center_rot_px = (numpy.array(self._rep) - 1) / 2
-        self._center_rot_phys = self._scale_px_to_phys @ center_rot_px
-
-        logging.debug("scale: %s, rotation: %s, center = %s",
-                self._scale_px_to_phys,
-                      self._rotation_px_to_phys,
-                      self._center_rot_phys)  #DEBUG
-
-
     def prepare_acquisition(self) -> None:
         """
         Called just before the acquisition starts, after the leeches have been initialized.
@@ -4749,12 +4815,10 @@ class SEMCCDAcquirerRectangle(SEMCCDAcquirer):
         self._mdstream._acq_data = []  # To regain memory
 
     def start_spatial_acquisition(self, pol_idx: Tuple[int, int]) -> None:
-        # Not much to do here. A lot of the work is delayed until receiving the first data,
-        # which is easy to detect as px_idx = 0,0
-        pass
+        super().start_spatial_acquisition(pol_idx)
 
     def complete_spatial_acquisition(self, pol_idx) -> List[Optional[model.DataArray]]:
-        return [None for _ in self._mdstream._streams]  # No data, as it's all been acquired per snapshot
+        return super().complete_spatial_acquisition(pol_idx)
 
     def start_pixel_acquisition(self, px_idx) -> Tuple[float, float]:
         """
@@ -4906,13 +4970,14 @@ class SEMCCDAcquirerRectangle(SEMCCDAcquirer):
         return ret_das
 
 
-class SEMCCDAcquirerVector(SEMCCDAcquirer):
+class SEMCCDAcquirerVector(SEMCCDAcquirerRectangle):
     """
     Acquirer for SEM+CCD detectors, which can be used to acquire images using the e-beam to scan,
     using vector scanning. It supports rotation, fuzzing, leeches, and pixel integration.
     It requires that the scanner component supports vector scanning. This is indicated by the presence
     of the .scanPath VA.
     """
+
     def prepare_hardware(self, max_snapshot_duration: Optional[float] = None) -> None:
         # TODO: the current prepare_hardware() should be compatible, but it probably does a lot too much,
         # as it's not necessary to configure the scanner for normal scanning.
@@ -5004,35 +5069,19 @@ class SEMCCDAcquirerVector(SEMCCDAcquirer):
 
 class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
     """
-    Acquirer for SEM CCD detectors with hardware synchronization.
-    TODO: explain more what it does and what are the limitations
+    Acquirer for SEM CCD detectors with hardware synchronization. It assumes there is a (physical)
+    connection between the scanner and the CCD, so that is pixel start triggers a frame acquisition.
+    This also relies on vector scanning, so the driver must support .scanPath too.
     """
-    # TODO: only use vector scanning mechanism, as it supports rotation, and "all" drivers that
-    # support hwsync should support vector scanning.
-
     def __init__(self, mdstream: SEMCCDMDStream):
         """
         :param mdstream: (SEMCCDMDStream) the stream to acquire from
         """
-        self._mdstream = mdstream
-
-        # Values to be initialized when calling prepare_hardware()
-        self.integration_count = 1  # number of snapshot acquisitions to do per pixel
-        self.snapshot_time = 0.0  # time in s for one snapshot acquisition
-
-        # original values of the hardware VAs to be restored after acquisition
-        self._orig_hw_values: Dict[model.VigilantAttribute, Any] = {}  # VA -> original value
-
-        self.pxs = self._mdstream._getPixelSize() # physical size a whole pixel in m (X,Y)
-        self._rep = self._mdstream.repetition.value # number of pixels in the spatial image (of the CL data)
+        super().__init__(mdstream)
 
         # No fuzzing supported => always 1x1 px
         # TODO: once scan path is supported, we can support fuzzing
         self.tile_size = (1, 1)  # number of sub-pixels in the SEM spatial image (X,Y) (= 1,1 if no fuzzing)
-
-        # the coordinates (X,Y) of each point scanned (2D index) in px relative to the center of the FoV
-        self._spot_pos = None  # numpy array  (Y,X,2)
-        self.pos_center = None  # position of the center of the spatial acquisition in physical coordinates in m (X,Y)
 
         self._scanner_trigger = self._mdstream._det0.softwareTrigger
         self._start_area_t = 0.0  # Timestamp of when the spatial acquisition started

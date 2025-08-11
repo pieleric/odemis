@@ -3093,58 +3093,54 @@ class Scanner(model.Emitter):
         # than the dwell time. This allows to send pixel signal during which half of the dwell time
         # the signal is high and the half of dwell time it is low. That's the slowest rate
         # that allows to distinguish each pixel.
-        full_shape = (scan_length, 2, dup)
+        full_shape = (scan_length * 2, dup)
         ttl_signal = numpy.empty(full_shape, dtype=dtype, order='C')
         inactive_bitmap = dtype(sum(1 << port for port, inv in self._ttl_inverted.items() if inv))
         ttl_signal[...] = inactive_bitmap
         # Special array view, with length as last dim, to tell numpy everything needs to be copied
-        ttl_signal_dup = numpy.moveaxis(ttl_signal, 0, 2)  # shape (2, dup, N)
+        ttl_signal_dup = numpy.moveaxis(ttl_signal, 0, 1)  # shape (dup, 2N)
 
         pixel_signal = None
         if hasattr(self, "scanPixelTTL") and self.scanPixelTTL.value is not None:
             pixel_signal = self.scanPixelTTL.value
-            if pixel_signal.shape[0] != scan_length:
-                logging.warning("Not using scanPixelTTL of shape {pixel_signal.shape} while path is of length {scan_length}.")
+            if pixel_signal.shape[0] != full_shape[0]:
+                logging.warning(f"Not using scanPixelTTL of shape {pixel_signal.shape} while path is of length {full_shape[0]}.")
                 pixel_signal = None
 
-        # Pixel: filled with alternating high/low
         if pixel_signal is not None and self._pixel_ttl:
+            # Copy: signal is initialised with everything set to inactive. Then:
+            # 1. for each output port which is controlled by the pixel signal,
             pixel_mask = dtype(sum(1 << c for c in self._pixel_ttl))
-            pixel_bits = pixel_signal * pixel_mask
-            ttl_signal[:, 0, 0] ^= pixel_bits  # xor, to flip the bit
-            del pixel_bits
+            # 2. all the samples where the signal is high is converted to the bitmask (using boolean AND bitmask)
+            pixel_bits = pixel_signal & pixel_mask
+            # 3. Invert all high samples => they are switched from inactive to active (using XOR)
+            ttl_signal_dup[...] ^= pixel_bits
 
         # Line: copy as-is
         line_signal = None
         if hasattr(self, "scanLineTTL") and self.scanLineTTL.value is not None:
             line_signal = self.scanLineTTL.value
-            if line_signal.shape[0] != scan_length:
-                logging.warning("Not using scanLineTTL of shape {line_signal.shape} while path is of length {scan_length}.")
+            if line_signal.shape[0] != full_shape[0]:
+                logging.warning(f"Not using scanLineTTL of shape {line_signal.shape} while path is of length {full_shape[0]}.")
                 line_signal = None
 
         if line_signal is not None and self._line_ttl:
             line_mask = dtype(sum(1 << c for c in self._line_ttl))
-            line_bits = line_signal * line_mask
+            line_bits = line_signal & line_mask
             ttl_signal_dup[...] ^= line_bits
-            # TODO: if there is no margin between each line, how to let the scanLineTTL indicate the
-            # separation between lines (to force a short low/high transition)?
 
         # Frame: copy as-is
         frame_signal = None
         if hasattr(self, "scanFrameTTL") and self.scanFrameTTL.value is not None:
             frame_signal = self.scanFrameTTL.value
-            if frame_signal.shape[0] != scan_length:
-                logging.warning("Not using scanLineTTL of shape {frame_signal.shape} while path is of length {scan_length}.")
+            if frame_signal.shape[0] != full_shape[0]:
+                logging.warning(f"Not using scanLineTTL of shape {frame_signal.shape} while path is of length {full_shape[0]}.")
                 frame_signal = None
 
         if frame_signal is not None and self._line_ttl:
             frame_mask = dtype(sum(1 << c for c in self._frame_ttl))
-            frame_bits = frame_signal * frame_mask
+            frame_bits = frame_signal & frame_mask
             ttl_signal_dup[...] ^= frame_bits
-            # Special case when the frame immediately starts, and goes until the end: force it low
-            # during the end of the last pixel, to get a transition.
-            if frame_bits[0] == 1 and frame_bits[-1] == 1:
-                ttl_signal[-1, -1, -1] ^= frame_mask
 
         return ttl_signal
 

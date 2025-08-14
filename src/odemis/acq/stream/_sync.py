@@ -430,7 +430,6 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
         self._acq_done.wait(5)
         return True
 
-    @abstractmethod
     def _adjustHardwareSettings(self):
         """
         Read the stream settings and adapt the SEM scanner accordingly.
@@ -2526,7 +2525,7 @@ class SEMCCDMDStream(MultipleDetectorStream):
     #
     #     return self.raw, error
 
-
+    # TODO: move to SEMCCDAcquirer
     def _waitForImage(self, img_time: float) -> bool:
         """
         Wait for the detector to acquire the image.
@@ -5062,6 +5061,116 @@ class SEMCCDAcquirerVector(SEMCCDAcquirerRectangle):
         return img_das
 
 
+class SEMCCDAcquirerScanStage(SEMCCDAcquirerRectangle):
+    """
+    Acquirer for SEM+CCD detectors, which can be used to acquire images using a scan stage to scan.
+    It supports fuzzing, leeches, and pixel integration (but not rotation).
+    It requires that a scan-stage is available.
+    There are actually 2 types of scan-stages (both are supported):
+    * dedicated scan-stage: a stage "on top" of the standard stage. Typically, it's very fast, precise,
+     and has a small range.
+    * sample stage: use the sample stage to scan. Slower, less accurate but cheaper.
+    """
+    def __init__(self, mdstream):
+        self._sstage = self._mdstream._sstage
+        if not self._sstage:
+            raise ValueError("Cannot acquire with scan stage, as no stage was provided")
+        self._scan_stage_is_stage = model.getComponent(role="stage").name in sstage.affects.value
+
+        super().__init__(mdstream)
+
+    def prepare_hardware(self, max_snapshot_duration: Optional[float] = None) -> None:
+        self._orig_spos = self._sstage.position.value  # TODO: need to protect from the stage being outside of the axes range?
+        return super().prepare_hardware(max_snapshot_duration)
+
+    def restore_hardware(self) -> None:
+        saxes = self._sstage.axes
+        if self._scan_stage_is_stage:
+            # if it's a scan-stage wrapper we use the sem stage for scanning so in
+            # this case go back to the (user selected) position before the acquisition
+            pos0 = self._orig_spos
+        else:
+            # Move back the stage to the center
+            pos0 = {"x": sum(saxes["x"].range) / 2,
+                    "y": sum(saxes["y"].range) / 2}
+        f = self._sstage.moveAbs(pos0)
+
+        super().restore_hardware()
+        f.result()  # Wait for the move to be completed before returning
+
+    def prepare_acquisition(self):
+        super().prepare_acquisition()
+
+        # Compute the tile scan path
+        dwell_time = self._mdstream._emitter.dwellTime.value # already computed by prepare_hardware()
+        roi = self._mdstream.roi.value
+        rep = self._rep
+        rotation = self._mdstream.rotation.value
+        # Define a tile of the size of one pixel, at the center of the FoV
+        tile_pxs_fov = ((roi[2] - roi[0]) / rep[0],
+                        (roi[3] - roi[1]) / rep[1])
+        tile_roi = (0.5 - tile_pxs_fov[0] / 2, 0.5 - tile_pxs_fov[1] / 2,  # around the center of the FoV
+                    0.5 + tile_pxs_fov[0] / 2, 0.5 + tile_pxs_fov[1] / 2)
+        self._tile_res = self._mdstream._emitter.resolution.value  # 1, 1 if no fuzzing
+        tile_pos_flat, tile_margin, tile_md_cor = scan.generate_scan_vector(self._mdstream._emitter,
+                                                                            self._tile_res,
+                                                                            tile_roi,
+                                                                            rotation,
+                                                                            dwell_time)
+        logging.debug("Tile scan path: %s", tile_pos_flat)  #DEBUG
+        self._tile_pos_flat = tile_pos_flat  # (X*Y,2) positions of the e-beam in px relative to the center of the FoV
+        self._tile_margin = tile_margin
+        self._tile_md_cor = tile_md_cor
+
+    def terminate_acquisition(self) -> None:
+        super().terminate_acquisition()
+        self._mdstream._emitter.scanPath.value = None  # disable vector scanning
+
+    def start_spatial_acquisition(self, pol_idx: Tuple[int, int]) -> None:
+        super().start_spatial_acquisition(pol_idx)
+
+    def complete_spatial_acquisition(self, pol_idx) -> List[Optional[model.DataArray]]:
+        return super().complete_spatial_acquisition(pol_idx)
+
+    def start_pixel_acquisition(self, px_idx) -> Tuple[float, float]:
+        return super().start_pixel_acquisition(px_idx)
+
+    def pause_pixel_acquisition(self) -> None:
+        super().pause_pixel_acquisition()
+
+    def resume_pixel_acquisition(self) -> None:
+        super().resume_pixel_acquisition()
+
+    def _move_scanner(self, px_idx: Tuple[int, int]) -> None:
+        # Move the e-beam to the position of the pixel
+        trans = tuple(self._spot_pos[px_idx])  # spot position
+
+        # take care of drift
+        if self._mdstream._dc_estimator:
+            trans = (trans[0] - self._mdstream._dc_estimator.tot_drift[0],
+                     trans[1] - self._mdstream._dc_estimator.tot_drift[1])
+
+        scan_path, clipped_trans = scan.shift_scan_vector(self._mdstream._emitter, self._tile_pos_flat, trans)
+        if trans != clipped_trans:
+            # it goes out of bound either due to the drift, or because the rotation causes some of the
+            # pixels to be slightly out of the FoV (but normally the GUI forbids drawing such shape)
+            if self._mdstream._dc_estimator:
+                logging.error(
+                    "Drift of %s px caused acquisition region out of bounds: %s limited to %s px",
+                    self._mdstream._dc_estimator.tot_drift, trans, clipped_trans)
+            else:
+                logging.error(
+                    "Acquisition region out of bounds: %s limited to %s px",
+                    trans, clipped_trans)
+
+        self._mdstream._emitter.scanPath.value = scan_path
+        logging.debug("E-beam spot after drift correction: %s px",
+                      trans)
+
+    def acquire_one_snapshot(self, n: int, px_idx: Tuple[int, int]
+                             ) -> List[Optional[model.DataArray]]:
+        das = super().acquire_one_snapshot(n, px_idx)
+
 class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
     """
     Acquirer for SEM CCD detectors with hardware synchronization. It assumes there is a (physical)
@@ -5302,3 +5411,4 @@ class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
                 n, now - self._start_area_t, self.snapshot_time * n)
 
         return ret_das
+

@@ -1347,8 +1347,9 @@ class SEMCCDMDStream(MultipleDetectorStream):
         :param future: Current future running for the whole acquisition.
         """
         if hasattr(self, "useScanStage") and self.useScanStage.value:
-            # TODO does not support polarimetry or image integration so far
-            return self._runAcquisitionScanStage(future)
+            acquirer = SEMCCDAcquirerScanStage(self)
+            return self._genericRunAcquisition(future, acquirer)
+            # return self._runAcquisitionScanStage(future)
         elif self._supports_hw_sync():
             logging.debug("Running hw sync")
             acquirer = SEMCCDAcquirerHwSync(self)
@@ -5072,15 +5073,24 @@ class SEMCCDAcquirerScanStage(SEMCCDAcquirerRectangle):
     * sample stage: use the sample stage to scan. Slower, less accurate but cheaper.
     """
     def __init__(self, mdstream):
+        super().__init__(mdstream)
+
         self._sstage = self._mdstream._sstage
         if not self._sstage:
             raise ValueError("Cannot acquire with scan stage, as no stage was provided")
-        self._scan_stage_is_stage = model.getComponent(role="stage").name in sstage.affects.value
+        stage = model.getComponent(role="stage")  # Sample stage
+        self._scan_stage_is_stage = stage.name in self._sstage.affects.value
+        self._orig_spos = self._sstage.position.value
+        self._prev_spos = self._orig_spos.copy()  # current position of the scan stage
 
-        super().__init__(mdstream)
+        saxes = self._sstage.axes
+        self._spos_rng = (saxes["x"].range[0], saxes["y"].range[0],
+                          saxes["x"].range[1], saxes["y"].range[1])
+
 
     def prepare_hardware(self, max_snapshot_duration: Optional[float] = None) -> None:
-        self._orig_spos = self._sstage.position.value  # TODO: need to protect from the stage being outside of the axes range?
+        # TODO: if not _scan_stage_is_stage, warn if not (approximately) centered
+
         return super().prepare_hardware(max_snapshot_duration)
 
     def restore_hardware(self) -> None:
@@ -5090,41 +5100,50 @@ class SEMCCDAcquirerScanStage(SEMCCDAcquirerRectangle):
             # this case go back to the (user selected) position before the acquisition
             pos0 = self._orig_spos
         else:
-            # Move back the stage to the center
+            # Move back the stage to the center (should be same as orig_spos but safer)
             pos0 = {"x": sum(saxes["x"].range) / 2,
                     "y": sum(saxes["y"].range) / 2}
+        logging.debug("Moving scan stage back to initial position %s", pos0)
         f = self._sstage.moveAbs(pos0)
 
         super().restore_hardware()
         f.result()  # Wait for the move to be completed before returning
 
-    def prepare_acquisition(self):
-        super().prepare_acquisition()
+    def _prepare_spot_positions(self) -> None:
+        """
+        Called by prepare_acquisition. Precompute basic data to convert from pixel index to
+        position in sample coordinates (absolute and relative).
+        """
+        # Absolute position of the center of the FoV (at init)
+        self.center_fov = self._mdstream._emitter.getMetadata().get(MD_POS, (0, 0))
+        # Absolute position of the center of the RoI
+        self.pos_center = self._mdstream._getCenterPositionPhys()
+        # Relative position of the center of the RoI from the center of the FoV
+        self.pos_center_rel = (self.pos_center[0] - self.center_fov[0],
+                               self.pos_center[1] - self.center_fov[1])
+        self.pos_center_scan = numpy.array([self._orig_spos["x"] + self.pos_center_rel[0],
+                                            self._orig_spos["y"] + self.pos_center_rel[1]])
 
-        # Compute the tile scan path
-        dwell_time = self._mdstream._emitter.dwellTime.value # already computed by prepare_hardware()
-        roi = self._mdstream.roi.value
-        rep = self._rep
+        # Transformation from the RoI pixel index to physical (sample) coordinates
+        self._scale_px_to_phys = numpy.array([[self.pxs[0], 0],
+                                              [0, -self.pxs[1]]])  # Y is inverted in the physical coordinates
         rotation = self._mdstream.rotation.value
-        # Define a tile of the size of one pixel, at the center of the FoV
-        tile_pxs_fov = ((roi[2] - roi[0]) / rep[0],
-                        (roi[3] - roi[1]) / rep[1])
-        tile_roi = (0.5 - tile_pxs_fov[0] / 2, 0.5 - tile_pxs_fov[1] / 2,  # around the center of the FoV
-                    0.5 + tile_pxs_fov[0] / 2, 0.5 + tile_pxs_fov[1] / 2)
-        self._tile_res = self._mdstream._emitter.resolution.value  # 1, 1 if no fuzzing
-        tile_pos_flat, tile_margin, tile_md_cor = scan.generate_scan_vector(self._mdstream._emitter,
-                                                                            self._tile_res,
-                                                                            tile_roi,
-                                                                            rotation,
-                                                                            dwell_time)
-        logging.debug("Tile scan path: %s", tile_pos_flat)  #DEBUG
-        self._tile_pos_flat = tile_pos_flat  # (X*Y,2) positions of the e-beam in px relative to the center of the FoV
-        self._tile_margin = tile_margin
-        self._tile_md_cor = tile_md_cor
+        ct = math.cos(rotation)
+        st = math.sin(rotation)
+        self._rotation_px_to_phys = numpy.array([(ct, -st), (st, ct)])
+        center_rot_px = (numpy.array(self._rep) - 1) / 2
+        self._center_rot_phys = self._scale_px_to_phys @ center_rot_px
+
+        # Scanner pixel size: to convert from scanner translation (px) to physical coordinates (m),
+        # during drift correction. Independent of the scanner scan settings.
+        self._scanner_pxs = self._mdstream._emitter.pixelSize.value  # m, m
+
+    def prepare_acquisition(self) -> None:
+        super().prepare_acquisition()
+        # After the hardware is prepared: the SEM scanner
 
     def terminate_acquisition(self) -> None:
         super().terminate_acquisition()
-        self._mdstream._emitter.scanPath.value = None  # disable vector scanning
 
     def start_spatial_acquisition(self, pol_idx: Tuple[int, int]) -> None:
         super().start_spatial_acquisition(pol_idx)
@@ -5133,43 +5152,73 @@ class SEMCCDAcquirerScanStage(SEMCCDAcquirerRectangle):
         return super().complete_spatial_acquisition(pol_idx)
 
     def start_pixel_acquisition(self, px_idx) -> Tuple[float, float]:
+        # Note: the original code
         return super().start_pixel_acquisition(px_idx)
 
     def pause_pixel_acquisition(self) -> None:
+        # TODO: how to do only if anchor drift? Maybe do it only if a drift correction?
+        if self._mdstream._dc_estimator:
+            # Move back to orig pos, to not compensate for the scan stage move
+            self._sstage.moveAbsSync(self._orig_spos)
+            self._prev_spos.update(self._orig_spos)
+
         super().pause_pixel_acquisition()
 
     def resume_pixel_acquisition(self) -> None:
         super().resume_pixel_acquisition()
+        # No need to move back immediately. It will be done on next call to acquire_one_snapshot()
 
     def _move_scanner(self, px_idx: Tuple[int, int]) -> None:
-        # Move the e-beam to the position of the pixel
-        trans = tuple(self._spot_pos[px_idx])  # spot position
+        """
+        Called by acquire_one_snapshot().
+        Moves the scan stage to the position corresponding to the given pixel index.
+        :param px_idx: pixel index of the pixel to be acquired
+        """
+        # Same formula as in start_pixel_acquisition, but in the *scan* stage coordinates
+        # Convert from px to m (with Y inverted), relative to the top-left
+        px_pos_m = self._scale_px_to_phys @ px_idx[::-1]
+        # Rotation around the center of the RoI
+        px_pos_rot = self._rotation_px_to_phys @ (px_pos_m - self._center_rot_phys)
+        # Shift by the position of the RoI in the stage scan coordinates
+        # Absolute position of the point in scan stage coordinates
+        px_pos_scan = px_pos_rot + self.pos_center_scan
+
+        logging.debug("Pixel position %s in scan stage coordinates: %s", px_idx[::-1], px_pos_scan)
 
         # take care of drift
         if self._mdstream._dc_estimator:
-            trans = (trans[0] - self._mdstream._dc_estimator.tot_drift[0],
-                     trans[1] - self._mdstream._dc_estimator.tot_drift[1])
+            tot_drift = self._mdstream._dc_estimator.tot_drift
+            drift_shift = (tot_drift[0] * self._scanner_pxs[0],
+                           - tot_drift[1] * self._scanner_pxs[1])  # Y is upside down
+            px_pos_scan -= numpy.array(drift_shift)
+        else:
+            drift_shift = (0, 0)
 
-        scan_path, clipped_trans = scan.shift_scan_vector(self._mdstream._emitter, self._tile_pos_flat, trans)
-        if trans != clipped_trans:
-            # it goes out of bound either due to the drift, or because the rotation causes some of the
-            # pixels to be slightly out of the FoV (but normally the GUI forbids drawing such shape)
-            if self._mdstream._dc_estimator:
-                logging.error(
-                    "Drift of %s px caused acquisition region out of bounds: %s limited to %s px",
-                    self._mdstream._dc_estimator.tot_drift, trans, clipped_trans)
-            else:
-                logging.error(
-                    "Acquisition region out of bounds: %s limited to %s px",
-                    trans, clipped_trans)
+        # TODO: apply drift correction on the ebeam. As it's normally at
+        # the center, it should very rarely go out of bound.
+        cspos = {"x": px_pos_scan[0],
+                 "y": px_pos_scan[1]}
+        if not (self._spos_rng[0] <= cspos["x"] <= self._spos_rng[2] and
+                self._spos_rng[1] <= cspos["y"] <= self._spos_rng[3]):
+            logging.error("Drift of %s px caused acquisition region out "
+                          "of bounds: needed to scan spot at %s.",
+                          drift_shift, cspos)
+            cspos = {"x": min(max(self._spos_rng[0], cspos["x"]), self._spos_rng[2]),
+                     "y": min(max(self._spos_rng[1], cspos["y"]), self._spos_rng[3])}
+        logging.debug("Scan stage pos: %s (including drift of %s)", cspos, drift_shift)
 
-        self._mdstream._emitter.scanPath.value = scan_path
-        logging.debug("E-beam spot after drift correction: %s px",
-                      trans)
+        # Remove unneeded moves, to not lose time with the actuator doing actually (almost) nothing
+        for a, p in list(cspos.items()):
+            if self._prev_spos[a] == p:
+                del cspos[a]
+
+        self._sstage.moveAbsSync(cspos)
+        self._prev_spos.update(cspos)
+        logging.debug("Got stage synchronisation")
 
     def acquire_one_snapshot(self, n: int, px_idx: Tuple[int, int]
                              ) -> List[Optional[model.DataArray]]:
-        das = super().acquire_one_snapshot(n, px_idx)
+        return super().acquire_one_snapshot(n, px_idx)
 
 class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
     """

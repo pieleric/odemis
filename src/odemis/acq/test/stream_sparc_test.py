@@ -58,6 +58,7 @@ from odemis.acq import stream, path, leech
 from odemis.acq.leech import ProbeCurrentAcquirer
 from odemis.acq.stream import POL_POSITIONS
 from odemis.util import testing, find_closest
+from odemis.util.testing import assert_pos_almost_equal
 
 logging.basicConfig(format="%(asctime)s  %(levelname)-7s %(module)s:%(lineno)d %(message)s")
 logging.getLogger().setLevel(logging.DEBUG)
@@ -1056,8 +1057,7 @@ class BaseSPARCTestCase(unittest.TestCase, ABC):
         """
         self.skipIfNotSupported("scan-stage", "spec")
         # Check that it works even when not at 0,0 of the sample stage
-        f = self.stage.moveRel({"x": -1e-3, "y": 2e-3})
-        f.result()
+        self.stage.moveRelSync({"x": -1e-3, "y": 2e-3})
 
         # Zoom in to make sure the ROI is not too big physically
         self.ebeam.horizontalFoV.value = 200e-6
@@ -1065,7 +1065,7 @@ class BaseSPARCTestCase(unittest.TestCase, ABC):
         # Move the stage to the top-left
         posc = {"x": sum(self.scan_stage.axes["x"].range) / 2,
                 "y": sum(self.scan_stage.axes["y"].range) / 2}
-        f = self.scan_stage.moveAbs(posc)
+        self.scan_stage.moveAbsSync(posc)
 
         # Create the streams
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam)
@@ -1082,8 +1082,6 @@ class BaseSPARCTestCase(unittest.TestCase, ABC):
         specs.repetition.value = (5, 6)
         specs.detExposureTime.value = 0.3  # s
         exp_pos, exp_pxs, exp_res = roi_to_phys(specs)
-
-        f.result()
 
         # Start acquisition
         estt = sps.estimateAcquisitionTime()
@@ -1113,10 +1111,9 @@ class BaseSPARCTestCase(unittest.TestCase, ABC):
         sp_dims = spec_md.get(model.MD_DIMS, "CTZYX"[-sp_da.ndim::])
         self.assertEqual(sp_dims, "CTZYX")
 
-        # Check the stage is back to top-left
+        # Check the stage is back to initial position
         pos = self.scan_stage.position.value
-        distc = math.hypot(pos["x"] - posc["x"], pos["y"] - posc["y"])
-        self.assertLessEqual(distc, 100e-9)
+        assert_pos_almost_equal(pos, posc, atol=100e-9)
 
         # Short acquisition (< 0.1s)
         specs.detExposureTime.value = 0.01  # s
@@ -1189,10 +1186,9 @@ class BaseSPARCTestCase(unittest.TestCase, ABC):
         f.cancel()
         time.sleep(0.1)
 
-        # Check the stage is back to top-left
+        # Check the stage is back to initial position
         pos = self.scan_stage.position.value
-        distc = math.hypot(pos["x"] - posc["x"], pos["y"] - posc["y"])
-        self.assertLessEqual(distc, 100e-9)
+        assert_pos_almost_equal(pos, posc, atol=100e-9)
 
         # Check it still works after cancelling
         specs.detExposureTime.value = 0.01  # s
@@ -1236,7 +1232,7 @@ class BaseSPARCTestCase(unittest.TestCase, ABC):
         # Move the stage to the top-left
         posc = {"x": sum(self.scan_stage.axes["x"].range) / 2,
                 "y": sum(self.scan_stage.axes["y"].range) / 2}
-        f = self.scan_stage.moveAbs(posc)
+        self.scan_stage.moveAbsSync(posc)
 
         # Create the streams
         sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam)
@@ -1260,8 +1256,6 @@ class BaseSPARCTestCase(unittest.TestCase, ABC):
         specs.repetition.value = (5, 6)
         specs.detExposureTime.value = 0.3  # s
         exp_pos, exp_pxs, exp_res = roi_to_phys(specs)
-
-        f.result()
 
         # Start acquisition
         estt = sps.estimateAcquisitionTime()
@@ -1304,10 +1298,9 @@ class BaseSPARCTestCase(unittest.TestCase, ABC):
         numpy.testing.assert_allclose(spec_md[model.MD_POS], exp_pos)
         numpy.testing.assert_allclose(spec_md[model.MD_PIXEL_SIZE], exp_pxs)
 
-        # Check the stage is back to top-left
+        # Check the stage is back to its initial position
         pos = self.scan_stage.position.value
-        distc = math.hypot(pos["x"] - posc["x"], pos["y"] - posc["y"])
-        self.assertLessEqual(distc, 100e-9)
+        assert_pos_almost_equal(pos, posc, atol=100e-9)
 
         # Short acquisition (< 0.1s)
         specs.detExposureTime.value = 0.01  # s
@@ -1709,7 +1702,7 @@ class Fake0DDataFlow(model.DataFlow):
 
 class SPARC2TestCase(BaseSPARCTestCase):
     """
-    Tests to be run with a (simulated) SPARCv2
+    Tests to be run with a (simulated) SPARCv2, with dedicated scan-stage
     """
     simulator_config = SPARC2_CONFIG
     capabilities = {"cl", "ar", "spec", "scan-stage"}
@@ -1839,11 +1832,14 @@ class SPARC2TestCaseStageWrapper(BaseSPARCTestCase):
     simulator_config = SPARC2_4SPEC_CONFIG
     capabilities = {"cl", "ar", "spec", "scan-stage"}
 
+    # TODO: move to the generic test cases? Do they also work on the "dedicated" scan stage?
+    # This one should be generic.
     def test_scan_stage_wrapper(self):
         """
         Simple test case to check if the scan stage wrapper works like expected.
         This wrapper setup is needed when there is no dedicated (physical) scan stage
         """
+        self.skipIfNotSupported("scan-stage", "spec")
         # Create the SEM and Spectrum streams
         sems = stream.SEMStream("test sem cl", self.sed, self.sed.data, self.ebeam)
         specs_sstage = stream.SpectrumSettingsStream("test spec",
@@ -1875,29 +1871,29 @@ class SPARC2TestCaseStageWrapper(BaseSPARCTestCase):
                            exp_cpos[1] + ((exp_pxsize[1] * exp_pxnum[1]) / 2))
         roi_rng = (rng_topleft, rng_bottomright)
 
-        self.stage_positions = []
-        self.ebeam_positions = []
-        self.done = 0
+        self.stage_positions = set()
+        self.ebeam_positions = set()
         self.ebeam_start_pos = self.ebeam.translation.value
         self.sstage_start_pos = self.scan_stage.position.value
 
         # Run the acquisition
         f = sps.acquire()
-        # prepare callbacks
-        f.add_update_callback(self.on_progress_update)
-        f.add_done_callback(self.on_done)
+        # Use progress update to track the position of the stage/ebeam: the progress is normally
+        # updated after every image acquired, so if everything goes as expected, the stage has moved
+        # after every progress update.
+        # As there is no drift correction, the ebeam should never move.
+        f.add_update_callback(self.on_progress_update_stage)
 
         self.data, exp = f.result()
         self.assertTrue(f.done())
         self.assertIsNone(exp)
 
-        # check if the ProgressiveFuture used to start the acquisition request is done
-        time.sleep(0.1)  # wait a tiny bit to assert done status
-        self.assertEqual(self.done, 1)
+        # Wait a tiny bit to ensure the progress update has been processed
+        time.sleep(0.1)
 
         # check if the stage has moved instead of the e-beam
-        self.assertTrue(self.stage_positions)
-        self.assertFalse(self.ebeam_positions)
+        self.assertGreater(len(self.stage_positions), 4)
+        self.assertEqual(len(self.ebeam_positions), 1)
 
         # check if the sem data is of the right shape
         sem_da = self.data[0]
@@ -1918,10 +1914,15 @@ class SPARC2TestCaseStageWrapper(BaseSPARCTestCase):
 
         # check if the centre pixel positions in stage_positions fall within the range of the selected ROI
         for pos in self.stage_positions:
-            self.assertGreater(pos["x"], roi_rng[0][0])
-            self.assertLess(pos["x"], roi_rng[1][0])
-            self.assertGreater(pos["y"], roi_rng[0][1])
-            self.assertLess(pos["y"], roi_rng[1][1])
+            self.assertGreater(pos[0], roi_rng[0][0])
+            self.assertLess(pos[0], roi_rng[1][0])
+            self.assertGreater(pos[1], roi_rng[0][1])
+            self.assertLess(pos[1], roi_rng[1][1])
+
+    def on_progress_update_stage(self, _, start, end):
+        sstage_pos = self.scan_stage.position.value
+        self.stage_positions.add((sstage_pos["x"], sstage_pos["y"]))
+        self.ebeam_positions.add(self.ebeam.translation.value)
 
     def test_scan_stage_wrapper_noccd(self):
         """
@@ -1983,17 +1984,14 @@ class SPARC2TestCaseStageWrapper(BaseSPARCTestCase):
         # Move back the stage to the center
         self.stage.moveAbsSync({"x": 0.0, "y": 0.0})
 
-    def on_done(self, _):
-        logging.debug("On done called")
-        if all([x == self.sstage_start_pos for x in self.stage_positions]):
-            self.stage_positions = None
-        if all([x == self.ebeam_start_pos for x in self.ebeam_positions]):
-            self.ebeam_positions = None
-        self.done += 1
+    # def on_done_stage(self, _):
+    #     # FIXME => use set
+    #     if all(x == self.sstage_start_pos for x in self.stage_positions):
+    #         self.stage_positions = None
+    #     if all(x == self.ebeam_start_pos for x in self.ebeam_positions):
+    #         self.ebeam_positions = None
+    #     self.done += 1
 
-    def on_progress_update(self, _, start, end):
-        self.stage_positions.append(self.scan_stage.position.value)
-        self.ebeam_positions.append(self.ebeam.translation.value)
 
 
 class SPARC2StreakCameraTestCase(BaseSPARCTestCase):

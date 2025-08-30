@@ -1097,6 +1097,9 @@ class SPARCTestCase(unittest.TestCase):
         self.end = end
         self.updates += 1
 
+
+    # TODO: add drift correction with period < 3x exposure time
+
     # @skip("simple")
     def test_acq_ar(self):
         """
@@ -1185,6 +1188,72 @@ class SPARCTestCase(unittest.TestCase):
             self.assertTrue(phys_roi[0] <= pos[0] <= phys_roi[2] and
                             phys_roi[1] <= pos[1] <= phys_roi[3])
 
+    def test_acq_ar_sub_px_drift(self):
+        """
+        Test AR acquisition with sub-pixel drift correction (ie, the drift estimation is measured
+        multiple times for each e-beam pixel, and hence the AR data has to be acquired via the
+        integrator)
+        """
+        # Create the stream
+        sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam)
+        ars = stream.ARSettingsStream("test ar", self.ccd, self.ccd.data, self.ebeam,
+                                      detvas={"exposureTime"})
+        sas = stream.SEMARMDStream("test sem-ar", [sems, ars])
+
+        # Drift corrector with anchor region
+        dc = leech.AnchorDriftCorrector(self.ebeam, self.sed)
+        dc.period.value = 1
+        dc.roi.value = (0.525, 0.525, 0.6, 0.6)
+        dc.dwellTime.value = 1e-06
+        sems.leeches.append(dc)
+
+        ars.roi.value = (0.1, 0.1, 0.8, 0.8)
+        self.ccd.binning.value = (4, 4)  # hopefully always supported
+
+        # Long acquisition => Should have 5 drift measurements per pixel
+        ars.detExposureTime.value = 5  # s
+        ars.repetition.value = (4, 6)
+        num_ar = numpy.prod(ars.repetition.value)
+        exp_pos, exp_pxs, exp_res = self._roiToPhys(ars)
+        phys_roi = (exp_pos[0] - (exp_pxs[0] * exp_res[0] / 2),
+                    exp_pos[1] - (exp_pxs[1] * exp_res[1] / 2),
+                    exp_pos[0] + (exp_pxs[0] * exp_res[0] / 2),
+                    exp_pos[1] + (exp_pxs[1] * exp_res[1] / 2),
+                    )
+
+        # Start acquisition
+        timeout = 1 + 1.5 * sas.estimateAcquisitionTime()
+        start = time.time()
+        for l in sems.leeches:
+            l.series_start()
+        f = sas.acquire()
+
+        # wait until it's over
+        data, exp = f.result(timeout)
+        for l in sems.leeches:
+            l.series_complete(data)
+
+        dur = time.time() - start
+        logging.debug("Acquisition took %g s", dur)
+        self.assertTrue(f.done())
+        self.assertIsNone(exp)
+        self.assertEqual(len(data), len(sas.raw))
+        sem_da = sas.raw[0]
+        self.assertEqual(sem_da.shape, exp_res[::-1])
+        ar_das = sas.raw[1:-1]
+        self.assertEqual(len(ar_das), num_ar)
+        for d in ar_das:
+            md = d.metadata
+            self.assertIn(model.MD_POS, md)
+            self.assertIn(model.MD_AR_POLE, md)
+            pos = md[model.MD_POS]
+            self.assertTrue(phys_roi[0] <= pos[0] <= phys_roi[2] and
+                            phys_roi[1] <= pos[1] <= phys_roi[3],
+                            "Position %s not in expected ROI %s" % (pos, phys_roi))
+
+        anchor_da = sas.raw[-1]  # Normally the anchor data is the last data
+        self.assertGreaterEqual(anchor_da.shape[-4], 1)
+        
     # @skip("simple")
     def test_acq_spec(self):
         """
@@ -1541,7 +1610,7 @@ class SPARC2TestCase(unittest.TestCase):
     """
     @classmethod
     def setUpClass(cls):
-        testing.start_backend(SPARC2_CONFIG)  #DEBUG
+        testing.start_backend(SPARC2_HWSYNC_CONFIG)  #DEBUG
 
         # Find CCD & SEM components
         cls.ccd = model.getComponent(role="ccd")
@@ -1551,7 +1620,7 @@ class SPARC2TestCase(unittest.TestCase):
         cls.cl = model.getComponent(role="cl-detector")
         cls.spgp = model.getComponent(role="spectrograph")
         cls.stage = model.getComponent(role="stage")
-        cls.sstage = model.getComponent(role="scan-stage")  #DEBUG
+        # cls.sstage = model.getComponent(role="scan-stage")  #DEBUG
         cls.filter = model.getComponent(role="cl-filter")
 
     def test_acq_cl(self):

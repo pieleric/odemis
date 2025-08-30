@@ -1848,13 +1848,16 @@ class TUCam(model.DigitalCamera):
         """
         model.DigitalCamera.__init__(self, name, role, **kwargs)
 
+        # initialized early for making terminate() happy in case of failure at init
+        self._dll = None
+        self.temp_timer: Optional[util.RepeatingTimer] = None
+
         if device == "fake":
             self._dll = FakeTUCamDLL()
         else:
+            # TODO: should raise nice HwError if no camera
             self._dll = TUCamDLL()
         self._open_camera(device)
-
-        self.temp_timer = None  # RepeatingTimer or None
 
         # drivers/hardware info
         hw_name = self._dll.getModelName()
@@ -1870,23 +1873,16 @@ class TUCam(model.DigitalCamera):
 
         # Max resolution depends on the binning, so to know the max resolution, need to set binning to 1x1
         self._dll.setBinning((1, 1))
-        resolution = self._dll._get_max_resolution()
-        self._metadata[model.MD_SENSOR_SIZE] = self._transposeSizeToUser(resolution)
+        max_res = self._dll._get_max_resolution()
+        self._metadata[model.MD_SENSOR_SIZE] = self._transposeSizeToUser(max_res)
 
-        self._shape = resolution + (2 ** 16,)
+        self._shape = max_res + (2 ** 16,)  # _shape always uses the hardware order
 
         # put the detector pixelSize
         psize = (10e-6, 10e-6) #self.GetPixelSize()  #m,  TODO: fill in
         psize = self._transposeSizeToUser(psize)  # m
         self.pixelSize = model.VigilantAttribute(psize, unit="m", readonly=True)
         self._metadata[model.MD_SENSOR_PIXEL_SIZE] = psize
-
-        # need to be before binning, as it is modified when changing binning
-        min_res = (1, 1)  # TODO: fill in
-        self.resolution = model.ResolutionVA(self._transposeSizeToUser(resolution),
-                                             (self._transposeSizeToUser(min_res),
-                                              self._transposeSizeToUser(resolution)),
-                                             setter=self._set_resolution)
 
         # The Dhyana only supports binning 1, 2 and 4
         # TODO: read the available binnings (via the available "resolutions") from the device
@@ -1895,6 +1891,21 @@ class TUCam(model.DigitalCamera):
         self.binning = model.VAEnumerated(self._transposeSizeToUser(binning),
                                           choices={self._transposeSizeToUser(b) for b in bin_choices},
                                           setter=self._set_binning)
+
+        min_res = (1, 1)  # TODO: check
+        self.resolution = model.ResolutionVA(self._transposeSizeToUser(max_res),
+                                             rng=(self._transposeSizeToUser(min_res),
+                                                  self._transposeSizeToUser(max_res)),
+                                             setter=self._set_resolution)
+
+        # Translation: to adjust the center of the RoI
+        hlf_shape = (max_res[0] // 2 - 1, max_res[1] // 2 - 1)
+        uh_shape = self._transposeSizeToUser(hlf_shape)
+        tran_rng = ((-uh_shape[0], -uh_shape[1]),
+                    (uh_shape[0], uh_shape[1]))
+        self.translation = model.ResolutionVA((0, 0), tran_rng, unit="px",
+                                              setter=self._set_translation)
+
         self._set_binning(self.binning.value)
         self._set_resolution(self.resolution.value)
 
@@ -1920,7 +1931,7 @@ class TUCam(model.DigitalCamera):
         current_temp = self._dll.getTemperature()
         self.temperature = model.FloatVA(current_temp, unit="°C", readonly=True)
         self._metadata[model.MD_SENSOR_TEMP] = current_temp
-        self.temp_timer = util.RepeatingTimer(10, self.updateTemperatureVA,
+        self.temp_timer = util.RepeatingTimer(10, self._update_temperature_va,
                                               "Camera temperature update")
         self.temp_timer.start()
 
@@ -1947,18 +1958,20 @@ class TUCam(model.DigitalCamera):
         """
         Must be called at the end of the usage of the Camera instance
         """
-        self.stop_generate()
+        if self._dll:
+            self.stop_generate()
 
-        if self.temp_timer is not None:
-            self.temp_timer.cancel()
-            self.temp_timer.join(10)
-            self.temp_timer = None
+            if self.temp_timer is not None:
+                self.temp_timer.cancel()
+                self.temp_timer.join(10)
+                self.temp_timer = None
 
-        self._dll.closeCamera()
+            self._dll.closeCamera()
+            self._dll = None
 
         super().terminate()
 
-    def updateTemperatureVA(self):
+    def _update_temperature_va(self):
         """
         to be called at regular interval to update the temperature
         """
@@ -1968,20 +1981,6 @@ class TUCam(model.DigitalCamera):
         self.temperature._value = temp
         self.temperature.notify(self.temperature.value)
         logging.debug("Temperature of %s is %d°C", self.name, temp)
-
-    # Acquisition methods
-    def start_generate(self):
-        """
-        Starts the image acquisition
-        The image are sent via the .data DataFlow
-        """
-        self._dll.start_camera_feed()
-
-    def stop_generate(self):
-        """
-        Stop the image acquisition
-        """
-        self._dll.stop_camera_feed()
 
     # Wrappers to the actual DLL functions
     def _open_camera(self, device: Optional[str]):
@@ -1996,20 +1995,94 @@ class TUCam(model.DigitalCamera):
             raise model.HwError("No Tucsen camera found, check the camera is turned on")
 
     def _set_binning(self, value: Tuple[int, int]) -> Tuple[int, int]:
+        """
+        Called when "binning" VA is modified. It actually modifies the camera binning.
+        """
+        # Dhyana only supports (1,1) (2,2) (4,4), this is already validated by the enumerated VA
+        binning = self._transposeSizeFromUser(value)
+        prev_binning = self._transposeSizeFromUser(self.binning.value)
+
+        # adapt resolution so that the RoI stays the same
+        change = (prev_binning[0] / binning[0],
+                  prev_binning[1] / binning[1])
+        old_resolution = self._transposeSizeFromUser(self.resolution.value)
+        new_res = (int(round(old_resolution[0] * change[0])),
+                   int(round(old_resolution[1] * change[1])))
+
+        # TODO: move the adapter here (ie: store resolution_id & call should_update_settings)
         self._dll.setBinning(value)
-        # Dhyana only supports (1,1) (2,2) (4,4)
-        return self._dll.getBinning()
+
+        # The low-level settings have been updated, so the resolution and translation setters can
+        # use it to know the new binning.
+        ures = self._transposeSizeToUser(new_res)
+        self.resolution.value = self.resolution.clip(ures)
+
+        return self._transposeSizeToUser(binning)
 
     def _set_resolution(self, value: Tuple[int, int]) -> Tuple[int, int]:
+        """
+        Called when the resolution VA is changed. The VA accepts all values, but the setter automatically
+        limits the resolution based on the current binning.
+        :param value: requested resolution
+        :return: accepted resolution
+        """
         # resolution, call with (2048, 2040) or lower
-        self._dll.setResolution(value)
-        return self._dll.getResolution()
+        res = self._transposeSizeFromUser(value)
 
-    # translation, shifts ROI
+        # Use the low-level binning, because in case we are called from the binning setter, the VA
+        # is not yet updated
+        # binning = self._dll.getBinning()  # the setting that is about to be set
+        max_res = self._dll._get_max_resolution()  # depends on the binning
+
+        res = (min(res[0], max_res[0]), min(res[1], max_res[1]))
+        self._dll.setResolution(res)
+
+        self.translation.value = self.translation.value # force re-check
+        return self._transposeSizeToUser(res)
+
     def _set_translation(self, value: Tuple[int, int]) -> Tuple[int, int]:
-        self._dll.translation = value
+        """
+        Called when the resolution VA is changed. The VA accepts all values,  it will always ensure
+        that the whole RoI fits the screen (taking into account binning and resolution)
+        :param value: shift from the center (px).
+        :return: accepted shift
+        """
+        trans = self._transposeTransFromUser(value)
+        # compute the min/max of the shift. It's the same as the margin between
+        # the centered ROI and the border, taking into account the binning.
+        max_res = self._shape[:2]
+        binning = self._dll.getBinning()
+        res = self._dll.getResolution()
+        max_tran = ((max_res[0] - res[0] * binning[0]) // 2,
+                    (max_res[1] - res[1] * binning[1]) // 2)
 
-        return value
+        # between -margin and +margin
+        trans = (min(max(-max_tran[0], trans[0]), max_tran[0]),
+                 min(max(-max_tran[1], trans[1]), max_tran[1]))
+        self._dll.translation = trans  # FIXME no effect!! -> directly update .roi?
+        return self._transposeTransToUser(trans)
+
+    def _get_phys_trans(self) -> Tuple[float, float]:
+        """
+        Compute the translation in physical units (using the available metadata).
+        Note: the convention is that in internal coordinates Y goes down, while
+        in physical coordinates, Y goes up.
+        returns (tuple of 2 floats): physical position relative to the center in meters
+        """
+        try:
+            pxs = self._metadata[model.MD_PIXEL_SIZE]
+            # take into account correction
+            pxs_cor = self._metadata.get(model.MD_PIXEL_SIZE_COR, (1, 1))
+            pxs = (pxs[0] * pxs_cor[0], pxs[1] * pxs_cor[1])
+        except KeyError:
+            pxs = self._metadata[model.MD_SENSOR_PIXEL_SIZE]
+
+        trans = self.translation.value # use user transposed value, as it's external world
+        # subtract 0.5 px if the resolution is a odd number
+        shift = [t - (r % 2) / 2 for t, r in zip(trans, self.resolution.value)]
+        phyt = (shift[0] * pxs[0], -shift[1] * pxs[1]) # - to invert Y
+
+        return phyt
 
     # gain,  select between “high dynamic range” (2.0) and “high speed” (1.0)
     # TODO check this, the camera does not support gain
@@ -2028,6 +2101,20 @@ class TUCam(model.DigitalCamera):
     def _set_exposure_time(self, value: float) -> float:
         self._dll.setExposureTime(value)
         return self._dll.getExposureTime()
+
+    # Acquisition methods
+    def start_generate(self):
+        """
+        Starts the image acquisition
+        The image are sent via the .data DataFlow
+        """
+        self._dll.start_camera_feed(self.data.notify)
+
+    def stop_generate(self):
+        """
+        Stop the image acquisition
+        """
+        self._dll.stop_camera_feed()
 
 
 class DataFlow(model.DataFlow):

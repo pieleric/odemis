@@ -28,7 +28,7 @@ import time
 import weakref
 from ctypes import *
 from enum import Enum
-from typing import Tuple, Optional, Callable
+from typing import Tuple, Optional, Callable, Dict, Any
 
 import numpy.ctypeslib
 
@@ -1199,7 +1199,7 @@ class TUCamDLL:
         self._fan_speed = 0  # 0 = max, 3 = off (water cooling)
         self._exposureTime = 1.0
         self._parametersChanged = True
-        self._camThread = None
+        self._camThread = None  # TODO: need to move applyParameter to TUCam
 
         # call init and open
         self.Path = './'
@@ -1339,8 +1339,6 @@ class TUCamDLL:
         logging.debug("Open camera succeeded, idx=%d" % idx)
 
     def closeCamera(self):
-        self.stop_camera_feed()
-
         if 0 != self.TUCAMOPEN.hIdxTUCam:
             self.TUCAM_Dev_Close(self.TUCAMOPEN.hIdxTUCam)
         self.TUCAMOPEN.hIdxTUCam = 0
@@ -1416,35 +1414,31 @@ class TUCamDLL:
         self.TUCAM_Buf_Alloc(self.TUCAMOPEN.hIdxTUCam, pointer(self.m_frame))
         self.TUCAM_Cap_Start(self.TUCAMOPEN.hIdxTUCam, self.m_capmode.TUCCM_SEQUENCE.value)
 
-    def captureFrame(self):
+    def captureFrame(self, timeout: float) -> numpy.ndarray:
 
         try:
-            self.TUCAM_Buf_WaitForFrame(self.TUCAMOPEN.hIdxTUCam, pointer(self.m_frame), 1000)
+            self.TUCAM_Buf_WaitForFrame(self.TUCAMOPEN.hIdxTUCam, pointer(self.m_frame), int(timeout * 1000))
         except OSError as ex:
             # FIXME: should not be necessary if the error is properly converted
             raise TUCamError(TUCAMRET_Enum.TUCAMRET_TIMEOUT, "timeout")
 
         self.m_frameidx += 1
 
-        # Create an empty NumPy array of the same length and dtype ---
+        # Copy the data into a NumPy array of the same length and dtype
         p = cast(self.m_frame.pBuffer + self.m_frame.usOffset, POINTER(c_uint16))
         np_buffer = numpy.ctypeslib.as_array(p, (self.m_frame.usHeight, self.m_frame.usWidth))
         np_array = np_buffer.copy()
+        return np_array
 
-        #print(np_array)
-        # da = model.DataArray(np_array, {})
-        # hdf5.export(f"test_tucsen{self.m_frameidx}.h5", da)
-        # todo: now move the np array to Odemis
-
-    def captureFrameAndSave(self, image_name):
-        fs = TUCAM_FILE_SAVE()
-        fs.nSaveFmt = TUIMG_FORMATS.TUFMT_PNG.value  # save as png
-        fs.pFrame = pointer(self.m_frame)
-        ImgName = image_name + str(self.m_frameidx)
-        fs.pstrSavePath = ImgName.encode('utf-8')
-
-        self.TUCAM_Buf_WaitForFrame(self.TUCAMOPEN.hIdxTUCam, pointer(self.m_frame), 1000)
-        self.TUCAM_File_SaveImage(self.TUCAMOPEN.hIdxTUCam, fs)
+    # def captureFrameAndSave(self, image_name):
+    #     fs = TUCAM_FILE_SAVE()
+    #     fs.nSaveFmt = TUIMG_FORMATS.TUFMT_PNG.value  # save as png
+    #     fs.pFrame = pointer(self.m_frame)
+    #     ImgName = image_name + str(self.m_frameidx)
+    #     fs.pstrSavePath = ImgName.encode('utf-8')
+    #
+    #     self.TUCAM_Buf_WaitForFrame(self.TUCAMOPEN.hIdxTUCam, pointer(self.m_frame), 1000)
+    #     self.TUCAM_File_SaveImage(self.TUCAMOPEN.hIdxTUCam, fs)
 
     def endCapture(self):
         self.TUCAM_Buf_AbortWait(self.TUCAMOPEN.hIdxTUCam)
@@ -1562,25 +1556,6 @@ class TUCamDLL:
     def getSwVersion(self) -> str:
         return self.get_camera_info_astext(TUCAM_IDINFO.TUIDI_VERSION_API)
 
-    # camera feed using thread.
-    # call only on open camera.
-
-    def start_camera_feed(self, callback):
-        self._camThread = CAMThread()
-        self._camThread.start_thread(dll=self, callback=callback)
-
-    def stop_camera_feed(self):
-        if self._camThread != None:
-            self._camThread.stop_thread()
-            self._camThread.join()
-        self._camThread = None
-
-    def __del__(self):
-        try:
-            self.TUCAM_Api_Uninit()
-        except Exception as e:
-            # library throws wierd excp if init failed. ignore this.
-            logging.debug("TUCAM_Api_Uninit exception")
 
 class FakeTUCamDLL:
     """
@@ -1597,7 +1572,7 @@ class FakeTUCamDLL:
         self._fan_speed = 0  # 0 = max, 3 = off (water cooling)
         self._exposureTime = 1.0
         self._parametersChanged = True
-        self._camThread = None
+        self._camThread = None  # TODO: need to move applyParameter to TUCam
         self._frameIdx = 0
         self._nrCameras = 1     # fake one camera.
 
@@ -1605,6 +1580,9 @@ class FakeTUCamDLL:
         self.Path = './'
 
         self._lock = threading.Lock()
+
+    def TUCAM_Api_Uninit(self):
+        pass
 
     def applyParameters(self, fromThread=False):
         with self._lock:
@@ -1621,7 +1599,6 @@ class FakeTUCamDLL:
             raise model.HwError("No Tucsen camera found, check the camera is turned on")
 
         logging.debug("Open camera succeeded, idx=%d" % idx)
-        self.stop_camera_feed()
 
     def closeCamera(self):
         pass
@@ -1629,29 +1606,26 @@ class FakeTUCamDLL:
     def startCapture(self):
         pass
 
-    def captureFrame(self):
+    def endCapture(self):
+        pass
+
+    def captureFrame(self, timeout: float) -> numpy.ndarray:
 
         # wait for camera exposure time, then produce a random noise image
         time.sleep(self._exposureTime)
 
         self._frameIdx += 1
 
-        # Create an empty NumPy array of the same length and dtype ---
-        arr = numpy.empty((self._roi[2], self._roi[3]))
+        # Create an empty NumPy array of the same length and dtype
+        arr = numpy.empty((self._roi[2], self._roi[3]), dtype=numpy.uint16)
 
-        # Fill with random integers between 0 and 150
-        np_array = numpy.random.randint(0, 150, size=arr.shape)
+        # Basic: just a gradient
+        arr[:] = numpy.linspace(100, 2 ** 16 - 300, self._roi[3])
 
-        return np_array
+        # Add some noise
+        arr += numpy.random.randint(0, 200, arr.shape, dtype=arr.dtype)
 
-    def captureFrameAndSave(self, image_name):
-        # cannot call TUCAM_File_SaveImage, so just sleep for the exposuretime
-        time.sleep(self._exposureTime)
-
-        self.m_frameidx += 1
-
-    def endCapture(self):
-        pass
+        return arr
 
     # camera properties
     def _get_max_resolution(self):
@@ -1765,69 +1739,6 @@ class FakeTUCamDLL:
     def getSwVersion(self):
         return "1.0.0.fake"
 
-    # camera feed using thread.
-    # call only on open camera.
-
-    def start_camera_feed(self):
-        self._camThread = CAMThread()
-        self._camThread.start_thread(dll=self)
-
-    def stop_camera_feed(self):
-        if self._camThread != None:
-            self._camThread.stop_thread()
-            self._camThread.join()
-        self._camThread = None
-
-    def __del__(self):
-        pass
-
-
-class CAMThread(threading.Thread):
-    def __init__(self):
-        super().__init__()
-        self._dll = None
-        self._callback = None
-        self._stop_requested = False
-
-    def start_thread(self, dll: TUCamDLL, callback: Callable):
-        self._dll = dll
-        self._callback = callback
-        self._stop_requested = False
-        self.start()
-
-    def stop_thread(self):
-        self._stop_requested = True
-
-    def run(self):
-        logging.debug("TUCAM CAMThread started")
-        try:
-            self._dll.startCapture()
-
-            while not self._stop_requested:
-
-                while not self._stop_requested and not self._dll._parametersChanged:
-                    # for real in odemis, use captureFrame
-                    try:
-                        array = self._dll.captureFrame()
-                    except TUCamError as ex:
-                        if ex.errno == TUCAMRET_Enum.TUCAMRET_TIMEOUT:
-                            logging.debug("Waiting a little longer")
-                        else:
-                            raise
-                    #ret = self._dll.captureFrameAndSave("./tucsen")  # todo this is for testing, replace with feed to Odemis
-                    # time.sleep(3)                   # dont blow up my hdd please
-
-                self._dll.applyParameters(True)
-
-        except Exception:
-            logging.exception("Failure during acquisition")
-            try:
-                self._dll.endCapture()
-            except Exception:
-                logging.debug("Failed to stop capture during failure")
-
-        logging.debug("TUCAM CAMThread stopped")
-
 
 class TUCam(model.DigitalCamera):
     """
@@ -1866,15 +1777,17 @@ class TUCam(model.DigitalCamera):
         self._metadata[model.MD_HW_NAME] = hw_name
         self._swVersion = self._dll.getSwVersion()
         self._metadata[model.MD_SW_VERSION] = self._swVersion
-        hwv = self._dll.getHwVersion()  # TODO
-        self._metadata[model.MD_HW_VERSION] = hwv
-        self._hwVersion = "%s (%s)" % (hw_name, hwv)
+        # hwv = self._dll.getHwVersion()  # TODO
+        # self._metadata[model.MD_HW_VERSION] = hwv
+        # self._hwVersion = "%s (%s)" % (hw_name, hwv)
+        self._hwVersion = hw_name
         self._metadata[model.MD_DET_TYPE] = model.MD_DT_INTEGRATING
 
         # Max resolution depends on the binning, so to know the max resolution, need to set binning to 1x1
         self._dll.setBinning((1, 1))
         max_res = self._dll._get_max_resolution()
         self._metadata[model.MD_SENSOR_SIZE] = self._transposeSizeToUser(max_res)
+        self._metadata[model.MD_BPP] = 16  # TODO: is that correct? Or less bits
 
         self._shape = max_res + (2 ** 16,)  # _shape always uses the hardware order
 
@@ -1949,6 +1862,9 @@ class TUCam(model.DigitalCamera):
 
         self.data = DataFlow(self)
 
+        self._camThread = None
+        self._stop_requested = False
+
         logging.debug("Camera %s component ready to use.", device)
 
     def __del__(self):
@@ -1959,7 +1875,9 @@ class TUCam(model.DigitalCamera):
         Must be called at the end of the usage of the Camera instance
         """
         if self._dll:
-            self.stop_generate()
+            if self._camThread:
+                self._camThread.join(10)
+                self._camThread = None
 
             if self.temp_timer is not None:
                 self.temp_timer.cancel()
@@ -1967,6 +1885,12 @@ class TUCam(model.DigitalCamera):
                 self.temp_timer = None
 
             self._dll.closeCamera()
+            try:
+                self._dll.TUCAM_Api_Uninit()
+            except Exception as ex:
+                # library throws weird exceptions if init failed. ignore this.
+                logging.debug("Ignoring Api_Uninit() failure: %s", ex)
+
             self._dll = None
 
         super().terminate()
@@ -2108,13 +2032,72 @@ class TUCam(model.DigitalCamera):
         Starts the image acquisition
         The image are sent via the .data DataFlow
         """
-        self._dll.start_camera_feed(self.data.notify)
+        # Wait for the current thread to end, if it's not finished
+        if self._camThread:
+            self._camThread.join()
+
+        self._stop_requested = False
+        self._camThread = threading.Thread(target=self._acquisition_thread)
+        self._camThread.start()
 
     def stop_generate(self):
         """
         Stop the image acquisition
         """
-        self._dll.stop_camera_feed()
+        self._stop_requested = True
+
+    def _prepare_image_metadata(self) -> Dict[str, Any]:
+        metadata = dict(self._metadata)  # duplicate
+        center = metadata.get(model.MD_POS, (0, 0))
+        phyt = self._get_phys_trans()
+        metadata[model.MD_POS] = (center[0] + phyt[0], center[1] + phyt[1])
+        metadata[model.MD_ACQ_DATE] = time.time()
+
+        # TODO this should update directly self._metadata, whenever applyParameters() is run
+        metadata[model.MD_BINNING] = self._transposeSizeToUser(self.binning.value)
+        metadata[model.MD_EXP_TIME] = self.exposureTime.value
+        return metadata
+
+    def _acquisition_thread(self):
+        logging.debug("TUCAM acquisition thread started")
+        try:
+            self._dll.startCapture()
+            while True:  # Acquire until requested to stop
+                if self._stop_requested:
+                    return
+                if self._dll._parametersChanged:
+                    self._dll.applyParameters(True)
+
+                # Acquire 1 frame
+                start_t = time.time()
+                metadata = self._prepare_image_metadata()
+
+                # Wait until the frame has arrived
+                while not self._stop_requested and not self._dll._parametersChanged:
+                    try:
+                        array = self._dll.captureFrame(timeout=0.1)
+                        logging.debug("Received image of %s after %s s", array.shape,
+                                      time.time() - start_t)
+                        da = model.DataArray(array, metadata)
+                        self.data.notify(da)
+                        break
+                    except TUCamError as ex:
+                        # Timeout is expected for any exposure time >= 0.1s
+                        if ex.errno == TUCAMRET_Enum.TUCAMRET_TIMEOUT:
+                            logging.debug("Waiting a little longer")
+                            continue
+                        else:
+                            raise
+
+        except Exception:
+            logging.exception("Failure during acquisition")
+        finally:
+            try:
+                self._dll.endCapture()
+            except Exception:
+                logging.debug("Failed to stop capture")
+
+        logging.debug("TUCAM acquisition thread ended")
 
 
 class DataFlow(model.DataFlow):

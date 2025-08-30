@@ -1474,7 +1474,7 @@ class BaseSPARCTestCase(unittest.TestCase, ABC):
 
     def test_acq_spec_rotated(self):
         """
-        Test short & long acquisition for Spectrometer
+        Test short & long acquisition for Spectrometer with rotation
         """
         self.skipIfNotSupported("spec", "vector")
         # Create the stream
@@ -1488,6 +1488,7 @@ class BaseSPARCTestCase(unittest.TestCase, ABC):
 
         specs.roi.value = (0.15, 0.6, 0.8, 0.8)
         specs.rotation.value = math.radians(10)
+        exp_rot = specs.rotation.value
 
         # Long acquisition (small rep to avoid being too long) > 0.1s
         specs.detExposureTime.value = 0.3  # s
@@ -1526,8 +1527,10 @@ class BaseSPARCTestCase(unittest.TestCase, ABC):
         spec_md = sp_da.metadata
         numpy.testing.assert_allclose(sem_md[model.MD_POS], spec_md[model.MD_POS])
         numpy.testing.assert_allclose(sem_md[model.MD_PIXEL_SIZE], spec_md[model.MD_PIXEL_SIZE])
+        numpy.testing.assert_allclose(sem_md[model.MD_ROTATION], spec_md[model.MD_ROTATION])
         numpy.testing.assert_allclose(spec_md[model.MD_POS], exp_pos)
         numpy.testing.assert_allclose(spec_md[model.MD_PIXEL_SIZE], exp_pxs)
+        numpy.testing.assert_allclose(spec_md[model.MD_ROTATION], exp_rot)
         sp_dims = spec_md.get(model.MD_DIMS, "CTZYX"[-sp_da.ndim::])
         self.assertEqual(sp_dims, "CTZYX")
 
@@ -1535,9 +1538,6 @@ class BaseSPARCTestCase(unittest.TestCase, ABC):
         specs.detExposureTime.value = 0.05  # s
         specs.repetition.value = (17, 20)
         exp_pos, exp_pxs, exp_res = roi_to_phys(specs)
-
-        # FIXME: with semnidaq, if using software sync'd, it takes about 0.15s per frame (ie x3) because the semnidaq
-        # takes 0.1s to stop acquiring/ With semcomedi, that's not the case => fix semnidaq to stop early?
 
         # Start acquisition
         timeout = 1 + 2.5 * sps.estimateAcquisitionTime()
@@ -1561,8 +1561,76 @@ class BaseSPARCTestCase(unittest.TestCase, ABC):
         spec_md = sp_da.metadata
         numpy.testing.assert_allclose(sem_md[model.MD_POS], spec_md[model.MD_POS])
         numpy.testing.assert_allclose(sem_md[model.MD_PIXEL_SIZE], spec_md[model.MD_PIXEL_SIZE])
+        numpy.testing.assert_allclose(sem_md[model.MD_ROTATION], spec_md[model.MD_ROTATION])
         numpy.testing.assert_allclose(spec_md[model.MD_POS], exp_pos)
         numpy.testing.assert_allclose(spec_md[model.MD_PIXEL_SIZE], exp_pxs)
+        numpy.testing.assert_allclose(spec_md[model.MD_ROTATION], exp_rot)
+        sp_dims = spec_md.get(model.MD_DIMS, "CTZYX"[-sp_da.ndim::])
+        self.assertEqual(sp_dims, "CTZYX")
+
+
+    def test_acq_spec_rotated_fuzzy(self):
+        """
+        Test acquisition for Spectrometer with rotation and fuzzing
+        """
+        self.skipIfNotSupported("spec", "vector")  # Rotation only supported on vector scan
+        # Create the stream
+        sems = stream.SEMStream("test sem", self.sed, self.sed.data, self.ebeam)
+        specs = stream.SpectrumSettingsStream("test spec", self.spec, self.spec.data, self.ebeam,
+                                              detvas={"exposureTime"})
+        sps = stream.SEMSpectrumMDStream("test sem-spec", [sems, specs])
+
+        # Warning: this test cases relies on the andorcam2 simulator, which simulates HW trigger
+        # by assuming the trigger is immediately received.
+
+        specs.roi.value = (0.15, 0.6, 0.8, 0.8)
+        specs.rotation.value = math.radians(50)
+        specs.fuzzing.value = True
+        exp_rot = specs.rotation.value
+
+        # Short acquisition (< 0.1s)
+        specs.detExposureTime.value = 0.1  # s
+        specs.repetition.value = (17, 10)
+        exp_pos, exp_pxs, exp_res = roi_to_phys(specs)
+
+        # Start acquisition
+        timeout = 1 + 3.5 * sps.estimateAcquisitionTime()
+        start = time.time()
+        f = sps.acquire()
+
+        # wait until it's over
+        data, exp = f.result(timeout)
+        dur = time.time() - start
+        logging.debug("Acquisition took %g s", dur)
+        self.assertTrue(f.done())
+        self.assertIsNone(exp)
+        self.assertEqual(len(data), len(sps.raw))
+        sem_da = sps.raw[0]
+
+        # The SEM res should have at least 2x2 sub-pixels per pixel
+        self.assertGreaterEqual(sem_da.shape[1], exp_res[0] * 2)
+        self.assertGreaterEqual(sem_da.shape[0], exp_res[1] * 2)
+        sp_da = sps.raw[1]
+        sem_res = sem_da.shape
+        sshape = sp_da.shape
+        spec_res = sshape[-2:]
+        res_upscale = (sem_res[0] / spec_res[0], sem_res[1] / spec_res[1])
+        self.assertGreaterEqual(res_upscale[0], 2)
+        self.assertGreaterEqual(res_upscale[1], 2)
+        self.assertEqual(len(sshape), 5)
+        self.assertGreater(sshape[0], 1)  # should have at least 2 wavelengths
+        self.assertEqual(sshape[-1:-3:-1], exp_res)
+
+        sem_md = sem_da.metadata
+        spec_md = sp_da.metadata
+        numpy.testing.assert_allclose(sem_md[model.MD_POS], spec_md[model.MD_POS])
+        numpy.testing.assert_allclose(sem_md[model.MD_PIXEL_SIZE],
+                                      (spec_md[model.MD_PIXEL_SIZE][0] / res_upscale[0],
+                                       spec_md[model.MD_PIXEL_SIZE][1] / res_upscale[1]))
+        numpy.testing.assert_allclose(sem_md[model.MD_ROTATION], spec_md[model.MD_ROTATION])
+        numpy.testing.assert_allclose(spec_md[model.MD_POS], exp_pos)
+        numpy.testing.assert_allclose(spec_md[model.MD_PIXEL_SIZE], exp_pxs)
+        numpy.testing.assert_allclose(spec_md[model.MD_ROTATION], exp_rot)
         sp_dims = spec_md.get(model.MD_DIMS, "CTZYX"[-sp_da.ndim::])
         self.assertEqual(sp_dims, "CTZYX")
 
@@ -2723,6 +2791,9 @@ class SPARC2HwSyncTestCase(BaseSPARCTestCase):
     """
     simulator_config = SPARC2_HWSYNC_CONFIG
     capabilities = {"ar", "spec", "hwsync", "vector"}
+
+    def test_acq_spec_rotated_fuzzy(self):
+        super().test_acq_spec_rotated_fuzzy()
 
 
 class SPARC2PolAnalyzerTestCase(BaseSPARCTestCase):

@@ -14,7 +14,7 @@ Odemis is distributed in the hope that it will be useful, but WITHOUT ANY WARRAN
 
 You should have received a copy of the GNU General Public License along with Odemis. If not, see http://www.gnu.org/licenses/.
 '''
-
+import abc
 # This contains "synchronised streams", which handle acquisition from multiple
 # detector simultaneously.
 # On the SPARC, this allows to acquire the secondary electrons and an optical
@@ -1350,7 +1350,7 @@ class SEMCCDMDStream(MultipleDetectorStream):
         if hasattr(self, "useScanStage") and self.useScanStage.value:
             # TODO does not support polarimetry or image integration so far
             return self._runAcquisitionScanStage(future)
-        elif False and self._supports_hw_sync():  #DEBUG
+        elif self._supports_hw_sync():
             logging.debug("Running hw sync")
             acquirer = SEMCCDAcquirerHwSync(self)
             return self._genericRunAcquisition(future, acquirer)
@@ -4500,26 +4500,33 @@ class ScannedRemoteTCStream(LiveStream):
         return self._dwellTime.value * numpy.prod(self.repetition.value) * 1.2 + 1.0
 
 
-class SEMCCDAcquirer:
+class SEMCCDAcquirer(abc.ABC):
     """
-    Acquirer for SEM CCD detectors, which can be used to acquire images using the e-beam to scan,
+    Abstract Acquirer for SEM+CCD streams, which can be used to acquire images using the e-beam to scan,
     without support for rotation. It supports fuzzing, leeches, and pixel integration.
+    """
 
-    Note on vocabulary:
-    * polarization: the polarization filter settings using for the spatial acquisition.
-    * spatial acquisition: the acquisition of an image along X&Y on the sample, by scanning the sample
-      typically either by moving the e-beam or moving the (scan) stage. Each pixel of this acquisition
-      corresponds to the acquisition by the light detector (eg, spectrum or AR).
-    * pixel acquisition: the (total) acquisition of the light corresponding to one position on the
-      sample. It corresponds to one or more light detector "snapshots". Moreover, each pixel
-      can correspond to a tile in the SEM scan (when fuzzing is used).
-    * snapshot acquisition: a single acquisition of the light detector at a given position on the sample.
-      It might be "integrated" (ie, summed) to generate a complete "pixel acquisition".
-    * sub-pixel: when fuzzing is activated, the e-beam scans a whole area corresponding to a given
-      pixel area. This scan generates a "tile" of the SEM image, where each pixel is called a "sub-pixel".
-    * leech: a separate "side" acquisition that is run from time to time during the whole spatial
-      acquisition. The most typical leech is the drift correction, which compensate of the shift
-      in X/Y over time.
+    def __init__(self, mdstream: SEMCCDMDStream) -> None:
+        """
+        :param mdstream: (SEMCCDMDStream) the stream to acquire from
+        """
+
+
+    def restore_hardware(self) -> None:
+        """
+        Restore the VAs of the hardware to their original values before the acquisition started
+        """
+        for va, value in self._orig_hw_values.items():
+            try:
+                va.value = value
+            except Exception:
+                logging.exception("Failed to restore VA %s to %s", va, value)
+
+
+class SEMCCDAcquirerRectangle(SEMCCDAcquirer):
+    """
+    Acquirer for SEM+CCD streams, which can be used to acquire images using the e-beam to scan,
+    without support for rotation. It supports fuzzing, leeches, and pixel integration.
     """
 
     def __init__(self, mdstream: SEMCCDMDStream):
@@ -4683,16 +4690,6 @@ class SEMCCDAcquirer:
 
         self.snapshot_time = frame_duration
         self.integration_count = integration_count
-
-    def restore_hardware(self) -> None:
-        """
-        Restore the VAs of the hardware to their original values before the acquisition started
-        """
-        for va, value in self._orig_hw_values.items():
-            try:
-                va.value = value
-            except Exception:
-                logging.exception("Failed to restore VA %s to %s", va, value)
 
     def _prepare_spot_positions(self) -> None:
         """
@@ -4975,9 +4972,16 @@ class SEMCCDAcquirerVector(SEMCCDAcquirer):
 
         scan_path, clipped_trans = scan.shift_scan_vector(self._mdstream._emitter, self._tile_pos_flat, trans)
         if trans != clipped_trans:
-            logging.error("Drift of %s px caused acquisition region out "
-                          "of bounds: %s limited to %s px",
-                          self._mdstream._dc_estimator.tot_drift, trans, clipped_trans)
+            # it goes out of bound either due to the drift, or because the rotation causes some of the
+            # pixels to be slightly out of the FoV (but normally the GUI forbids drawing such shape)
+            if self._mdstream._dc_estimator:
+                logging.error(
+                    "Drift of %s px caused acquisition region out of bounds: %s limited to %s px",
+                    self._mdstream._dc_estimator.tot_drift, trans, clipped_trans)
+            else:
+                logging.error(
+                    "Acquisition region out of bounds: %s limited to %s px",
+                    trans, clipped_trans)
 
         self._mdstream._emitter.scanPath.value = scan_path
         logging.debug("E-beam spot after drift correction: %s px",
@@ -5016,9 +5020,6 @@ class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
         self.integration_count = 1  # number of snapshot acquisitions to do per pixel
         self.snapshot_time = 0.0  # time in s for one snapshot acquisition
 
-        # FIXME
-        self.sem_time = 0.0  # time in s for one SEM acquisition during a snapshot (equal or shorter to the snapshot time)
-
         # original values of the hardware VAs to be restored after acquisition
         self._orig_hw_values: Dict[model.VigilantAttribute, Any] = {}  # VA -> original value
 
@@ -5046,8 +5047,6 @@ class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
         # Note: if the stream has "local VA" (ie, copy of the component VA), then it is assumed that
         # the component VA has already been set to the correct value. (ie, linkHwVAs() has been called)
 
-        # TODO: assume that all hardware supporting HwSync also support scan path, and so change to
-        # using the scan path. Then support rotation, integration time, and even fuzzing.
         if self._mdstream._integrationTime and self._mdstream._integrationCounts.value > 1:
             # We would need to request the e-beam scanner to duplicate each pixel N times.
             # (in order to send N triggers to the CCD)
@@ -5063,6 +5062,9 @@ class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
 
         fuzzing = (hasattr(self._mdstream, "fuzzing") and self._mdstream.fuzzing.value)
         if fuzzing:
+            # TODO: with vector scanning, fuzzing should be possible to support. Need to compute
+            # a special path which scans the whole area, once, during the exposure time, and then
+            # leaves the e-beam in the center during the overhead (ie, readout + margin)
             raise NotImplementedError("Fuzzing not supported with hardware sync")
 
         # Note: no need to update the CCD settings selected by the user here, as it has already been
@@ -5099,43 +5101,26 @@ class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
                             c_dwell_time, frame_duration_safe * integration_count)
         self._mdstream._emitter.dwellTime.value = c_dwell_time
 
-        # Configure the SEM resolution and scale to match the repetition and RoI of the settings
+        # Compute a scan vector, with the corresponding TTL pixel signal
         rep = self._rep
         roi = self._mdstream.roi.value
-        eshape = self._mdstream._emitter.shape
-        scale = (((roi[2] - roi[0]) * eshape[0]) / rep[0],
-                 ((roi[3] - roi[1]) * eshape[1]) / rep[1])
-        center = ((roi[0] + roi[2]) / 2, (roi[1] + roi[3]) / 2)
-        # translation is distance from center (situated at 0.5, 0.5), can be floats
-        trans = (eshape[0] * (center[0] - 0.5), eshape[1] * (center[1] - 0.5))
+        rotation = self._mdstream.rotation.value
+        self._pos_flat, self._margin, self._md_cor = scan.generate_scan_vector(self._mdstream._emitter, rep, roi, rotation,
+                                                             dwell_time=self._mdstream._emitter.dwellTime.value)
+        pixel_ttl_flat = scan.generate_scan_pixel_ttl(self._mdstream._emitter, rep, self._margin)
+        self._mdstream._emitter.scanPath.value = self._pos_flat
+        self._mdstream._emitter.scanPixelTTL.value = pixel_ttl_flat
 
-        cscale = self._mdstream._emitter.scale.clip(scale)
-        if cscale != scale:
-            logging.warning("Emitter scale requested (%s) != accepted (%s)",
-                            cscale, scale)
-        # Order matters (otherwise the other parameters might be changed by the scanner)
-        self._mdstream._emitter.scale.value = cscale
-        self._mdstream._emitter.resolution.value = rep
-        self._mdstream._emitter.translation.value = trans
-
-        logging.debug("Scanning resolution is %s and scale %s",
-                      self._mdstream._emitter.resolution.value,
-                      self._mdstream._emitter.scale.value)
-
-        # TODO: vector scanning: compute scan path and pixelTTL (with rotation, but no fuzzing or integration for now)
-        # scan.generate_scan_vector
-
-
-        # TODO: to support drift correction (leeches), need to use the leech, as in SEMMDStream._runAcquisition
-        # and it will need to update the ebeam setting block per block (of variable size)
+        # TODO: It should be possible to support leeches (eg, drift correction) by doing the same
+        # as in SEMMDStream._runAcquisition: compute the duration of the next leech and acquire a
+        # sub-block of pixels corresponding to this duration.
 
         # Note: no need to force the e-beam external state, as done in SEMCCDAcquirer,
         # because here the e-beam will scan just once, the entire area, so the driver can directly
         # do the right thing.
-        self.snapshot_time = frame_duration_safe  # TODO: is that what we need here? Or should it be just frame_duration?
+        self.snapshot_time = frame_duration
         self.integration_count = integration_count
 
-    # TODO: move to base class
     def restore_hardware(self) -> None:
         super().restore_hardware()
 
@@ -5161,12 +5146,12 @@ class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
         self._mdstream._df0.synchronizedOn(None)
 
         self._mdstream._emitter.scanPath.value = None  # disable vector scanning
+        self._mdstream._emitter.scanPixelTTL.value = None
 
         # Empty the queues (in case of error they might still contain some data)
         for q in self._mdstream._acq_data_queue:
             while not q.empty():
                 q.get()
-
 
     def start_spatial_acquisition(self, pol_idx: Tuple[int, int]) -> None:
         # TODO: create the _hwsync_subscribers and  _acq_data_queue in this class.
@@ -5211,6 +5196,11 @@ class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
                 raise TimeoutError(f"Timeout while waiting for SEM data after {time.time() - self._start_area_t} s")
             logging.debug("Got SEM data from %s", s)
             s._dataflow.unsubscribe(sub)
+
+            # Convert the data from a (flat) vector acquisition to an image
+            # Note: _md_cor is only useful for PIXEL_SIZE, as center and rotation are also computed
+            # as part of the acquisition, and set in _assembleLiveData()
+            sem_data = scan.vector_data_to_img(sem_data, self._rep, self._margin, self._md_cor)
 
             sem_data = self._mdstream._preprocessData(i, sem_data, (0, 0))
             das.append(sem_data)

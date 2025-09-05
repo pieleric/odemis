@@ -1957,26 +1957,6 @@ class TUCamDLL:
             """
         return self._gain
 
-    def getExposureTime(self):
-        """
-          Returns set exposure time,
-
-          Parameters
-          ----------
-          None
-
-          Returns
-          -------
-          current time, float
-
-          Raises
-          ------
-          TUCamError
-              If the actual SDK function call does not return TUCAMRET_SUCCESS.
-              See the exception for the actual cause.
-          """
-        return self._exposureTime
-
     def setExposureTime(self, value):
         """
              Sets exposure time, applies it to hardware
@@ -2020,6 +2000,26 @@ class TUCamDLL:
             """
         return self.get_property_info(TUCAM_IDPROP.TUIDP_EXPOSURETM)
 
+    def getExposureTime(self):
+        """
+          Reads the actual exposure time from the hardware.
+
+          Parameters
+          ----------
+          None
+
+          Returns
+          -------
+          current exposure time, float
+
+          Raises
+          ------
+          TUCamError
+              If the actual SDK function call does not return TUCAMRET_SUCCESS.
+              See the exception for the actual cause.
+          """
+        return self.get_property_value(TUCAM_IDPROP.TUIDP_EXPOSURETM).value
+
     def getTemperature(self):
         """
              Returns actual temperature
@@ -2038,7 +2038,7 @@ class TUCamDLL:
                  If the actual SDK function call does not return TUCAMRET_SUCCESS.
                  See the exception for the actual cause.
              """
-        return self.get_property_value(TUCAM_IDPROP.TUIDP_TEMPERATURE)
+        return self.get_property_value(TUCAM_IDPROP.TUIDP_TEMPERATURE).value
 
     def getModelName(self) -> str:
         """
@@ -2202,7 +2202,7 @@ class FakeTUCamDLL:
     def getFanSpeed(self):
         return (1.0 - self._fan_speed) / 3.0
 
-    def getTargetTemperature(self):
+    def getTemperature(self):
         return self._targetTemperature
 
     def setTargetTemperature(self, value):
@@ -2221,6 +2221,8 @@ class FakeTUCamDLL:
         return self._gain
 
     def getExposureTime(self):
+        # the fake dll returns the set exposure time, the real one reads
+        # it from the hardware
         return self._exposureTime
 
     def setExposureTime(self, value):

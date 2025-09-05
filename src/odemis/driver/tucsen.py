@@ -1229,68 +1229,68 @@ class TUCamDLL:
 
     def get_info(self, id: TUCAM_IDINFO):
         """
-            Returns info on an open camera.
+        Returns info on an open camera.
 
-            Parameters
-            ----------
-            id : TUCAM_IDINFO
-                The desired information identifier,
+        Parameters
+        ----------
+        id : TUCAM_IDINFO
+            The desired information identifier,
 
-            Returns
-            -------
-            str
+        Returns
+        -------
+        str
 
-            Raises
-            ------
-            TUCamError
-                If the actual SDK function call does not return TUCAMRET_SUCCESS
-            """
+        Raises
+        ------
+        TUCamError
+            If the actual SDK function call does not return TUCAMRET_SUCCESS
+        """
         tvinfo = TUCAM_VALUE_INFO(id.value, 0, 0, 0)
         self.TUCAM_Dev_GetInfo(self.TUCAMOPEN.hIdxTUCam, pointer(tvinfo))
         return ctypes.string_at(tvinfo.pText).decode('utf-8')
 
     def get_info_ex(self, id: TUCAM_IDINFO):
         """
-            Returns info on an open camera. This seems to be identical to get_info.
+        Returns info on an open camera. This seems to be identical to get_info.
 
-            Parameters
-            ----------
-            id : TUCAM_IDINFO
-                The desired information identifier,
+        Parameters
+        ----------
+        id : TUCAM_IDINFO
+            The desired information identifier,
 
-            Returns
-            -------
-            str
+        Returns
+        -------
+        str
 
-            Raises
-            ------
-            TUCamError
-                If the actual SDK function call does not return TUCAMRET_SUCCESS
-            """
+        Raises
+        ------
+        TUCamError
+            If the actual SDK function call does not return TUCAMRET_SUCCESS
+        """
         tvinfo = TUCAM_VALUE_INFO(id.value, 0, 0, 0)
         self.TUCAM_Dev_GetInfoEx(self.TUCAMOPEN.hIdxTUCam, pointer(tvinfo))
         return ctypes.string_at(tvinfo.pText).decode('utf-8')
 
     def get_capability_info(self, id: TUCAM_IDCAPA):
         """
-            Returns capability  on an open camera.
+        Returns capability  on an open camera.
 
-            Parameters
-            ----------
-            id : TUCAM_IDCAPA
-                The desired information identifier,
+        Parameters
+        ----------
+        id : TUCAM_IDCAPA
+            The desired information identifier,
 
-            Returns
-            -------
-            tuple of min, max, default, step
+        Returns
+        -------
+        tuple of min, max, default, step
 
-            Raises
-            ------
-            TUCamError
-                If the actual SDK function call does not return TUCAMRET_SUCCESS
-            ValueError
-                If the requested capability does not exists.
-            """
+        Raises
+        ------
+        TUCamError
+            If the actual SDK function call does not return TUCAMRET_SUCCESS
+        ValueError
+            If the requested capability does not exists.
+        """
         #returns information about the capability, meaning its minimum, maximum, default, step.
         if (id.value >= TUCAM_IDCAPA.TUIDC_ENDCAPABILITY.value):
             raise ValueError("No such capability")
@@ -1302,27 +1302,27 @@ class TUCamDLL:
 
     def set_capability_value(self, cap: TUCAM_IDCAPA, val):
         """
-            Sets a capability on an open camera.
-            For a list of capabilities see the SDK,  TUCAM_IDCAPA enum
+        Sets a capability on an open camera.
+        For a list of capabilities see the SDK,  TUCAM_IDCAPA enum
 
-            Parameters
-            ----------
-            cap : TUCAM_IDCAPA
-                The desired information identifier,
-            val : number
-                The value (float or int) to set the capability to.
+        Parameters
+        ----------
+        cap : TUCAM_IDCAPA
+            The desired information identifier,
+        val : number
+            The value (float or int) to set the capability to.
 
-            Returns
-            -------
-            tuple of min, max, default, step
+        Returns
+        -------
+        tuple of min, max, default, step
 
-            Raises
-            ------
-            TUCamError
-                If the actual SDK function call does not return TUCAMRET_SUCCESS
-            ValueError
-                If the requested capability does not exists, or it is out of range
-            """
+        Raises
+        ------
+        TUCamError
+            If the actual SDK function call does not return TUCAMRET_SUCCESS
+        ValueError
+            If the requested capability does not exists, or it is out of range
+        """
         try:
             capa = TUCAM_CAPA_ATTR()
             capa.idCapa = cap.value
@@ -1337,28 +1337,28 @@ class TUCamDLL:
 
     def get_property_info(self, id: TUCAM_IDPROP):
         """
-            Requests property info on an open camera.
-            For a list of properties see the SDK,  TUCAM_IDCAPA enum
-            Do not use this directly, see the helper functions like _applyExposureTime
+        Requests property info on an open camera.
+        For a list of properties see the SDK,  TUCAM_IDCAPA enum
+        Do not use this directly, see the helper functions like _applyExposureTime
 
-            Parameters
-            ----------
-            cap : TUCAM_IDCAPA
-                The desired information identifier,
-            val : number
-                The value (float or int) to set the capability to.
+        Parameters
+        ----------
+        cap : TUCAM_IDCAPA
+            The desired information identifier,
+        val : number
+            The value (float or int) to set the capability to.
 
-            Returns
-            -------
-            tuple of min, max, default, step values for that property
+        Returns
+        -------
+        tuple of min, max, default, step values for that property
 
-            Raises
-            ------
-            TUCamError
-                If the actual SDK function call does not return TUCAMRET_SUCCESS
-            ValueError
-                If the requested capability does not exists.
-            """
+        Raises
+        ------
+        TUCamError
+            If the actual SDK function call does not return TUCAMRET_SUCCESS
+        ValueError
+            If the requested capability does not exists.
+        """
         prop = TUCAM_PROP_ATTR()
         prop.idProp = id.value
         prop.nIdxChn = 0
@@ -1371,25 +1371,25 @@ class TUCamDLL:
 
     def get_property_value(self, id: TUCAM_IDPROP) -> float:
         """
-            Requests the current value of a property, on an open camera.
-            For a list of properties see the SDK,  TUCAM_IDPROP enum
+        Requests the current value of a property, on an open camera.
+        For a list of properties see the SDK,  TUCAM_IDPROP enum
 
-            Parameters
-            ----------
-            id: TUCAM_IDPROP
-                The desired information identifier,
+        Parameters
+        ----------
+        id: TUCAM_IDPROP
+            The desired information identifier,
 
-            Returns
-            -------
-            The current value of the requested property
+        Returns
+        -------
+        The current value of the requested property
 
-            Raises
-            ------
-            TUCamError
-                If the actual SDK function call does not return TUCAMRET_SUCCESS
-            ValueError
-                If the requested capability does not exists (is not in range of TUCAM_IDPROP
-            """
+        Raises
+        ------
+        TUCamError
+            If the actual SDK function call does not return TUCAMRET_SUCCESS
+        ValueError
+            If the requested capability does not exists (is not in range of TUCAM_IDPROP
+        """
         cvalue = c_double(-1.0)
         try:
             self.TUCAM_Prop_GetValue(self.TUCAMOPEN.hIdxTUCam, id.value, pointer(cvalue), 0)
@@ -1400,28 +1400,25 @@ class TUCamDLL:
 
     def set_property_value(self, id: TUCAM_IDPROP, val: float):
         """
-             Sets the value of a property, on an open camera.
-             For a list of properties see the SDK,  TUCAM_IDPROP enum
-
-             Parameters
-             ----------
-             id: TUCAM_IDPROP
-                 The desired information identifier,
-             val: float
-                The vlaue to set.
-
-             Returns
-             -------
-             Nothing
-
-             Raises
-             ------
-             TUCamError
-                 If the actual SDK function call does not return TUCAMRET_SUCCESS.
-                 This would mean that the value is out of range, use get_property_info for the valid range.
-             ValueError
-                 If the requested capability does not exists (is not in range of TUCAM_IDPROP)
-             """
+        Sets the value of a property, on an open camera.
+        For a list of properties see the SDK,  TUCAM_IDPROP enum
+        Parameters
+        ----------
+        id: TUCAM_IDPROP
+            The desired information identifier,
+        val: float
+           The vlaue to set.
+        Returns
+        -------
+        Nothing
+        Raises
+        ------
+        TUCamError
+            If the actual SDK function call does not return TUCAMRET_SUCCESS.
+            This would mean that the value is out of range, use get_property_info for the valid range.
+        ValueError
+            If the requested capability does not exists (is not in range of TUCAM_IDPROP)
+         """
         try:
             self.TUCAM_Prop_SetValue(self.TUCAMOPEN.hIdxTUCam, id.value, c_double(val), 0)
         except Exception:
@@ -1429,30 +1426,27 @@ class TUCamDLL:
 
     def get_resolution_info(self):
         """
-             Queries the camera for available resolutions.
-             On the DHYANA camera, there is only one resolution available,
-             and we use ROI to reduce it.
-
-             Parameters
-             ----------
-             id: TUCAM_IDPROP
-                 The desired information identifier,
-             val: float
-                The vlaue to set.
-
-             Returns
-             -------
-             Nothing
-
-             Raises
-             ------
-             Exception
-                If the camera is not opened.
-             TUCamError
-                 If the actual SDK function call does not return TUCAMRET_SUCCESS.
-             ValueError
-                 If the requested capability does not exists (is not in range of TUCAM_IDPROP)
-             """
+        Queries the camera for available resolutions.
+        On the DHYANA camera, there is only one resolution available,
+        and we use ROI to reduce it.
+        Parameters
+        ----------
+        id: TUCAM_IDPROP
+            The desired information identifier,
+        val: float
+           The vlaue to set.
+        Returns
+        -------
+        Nothing
+        Raises
+        ------
+        Exception
+           If the camera is not opened.
+        TUCamError
+            If the actual SDK function call does not return TUCAMRET_SUCCESS.
+        ValueError
+            If the requested capability does not exist (is not in range of TUCAM_IDPROP)
+         """
         if self.TUCAMOPEN.hIdxTUCam == 0:
             raise Exception("Camera not opened")
         valText = TUCAM_VALUE_TEXT()
@@ -1476,27 +1470,23 @@ class TUCamDLL:
         except Exception:
             raise Exception("Unable to get capability info")
 
-    def get_camera_info_astext(self, infoid: TUCAM_IDINFO):
+    def get_camera_info_astext(self, infoid: TUCAM_IDINFO) -> str:
         """
-              Queries the camera for info, like name of type.
-              Do not use diretcly, see helper functions like getModelName
+        Queries the camera for info, like name of type.
+        Do not use directly, see helper functions like getModelName
 
-              Parameters
-              ----------
-              infoid: TUCAM_IDINFO
-                The requested info, see TUCAM_IDONFO enum
+        Parameters
+        ----------
+        infoid: TUCAM_IDINFO
+        The requested info, see TUCAM_IDONFO enum
 
-              Returns
-              -------
-              str
-
-              Raises
-              ------
-              Exception
-                 If the camera is not opened.
-              TUCamError
-                  If the actual SDK function call does not return TUCAMRET_SUCCESS.
-              """
+        Raises
+        ------
+        Exception
+         If the camera is not opened.
+        TUCamError
+          If the actual SDK function call does not return TUCAMRET_SUCCESS.
+        """
         if self.TUCAMOPEN.hIdxTUCam == 0:
             raise Exception("Camera not opened")
 
@@ -1513,43 +1503,43 @@ class TUCamDLL:
 
     def setGlobalGain(self, gain_idx: int) -> None:
         """
-            Sets the global gain of the camera.
-            :param gain_idx:
-                The gain index, between 0 and 3:
-                0 = HDR (16 bits?!)
-                1: High gain (12 bits?)
-                2: Low gain (12 bits?)
-                3: HDR raw
+        Sets the global gain of the camera.
+        :param gain_idx:
+            The gain index, between 0 and 3:
+            0 = HDR (16 bits?!)
+            1: High gain (12 bits?)
+            2: Low gain (12 bits?)
+            3: HDR raw
 
-            Raises
-            ------
-            TUCamError
-                If the actual SDK function call does not return TUCAMRET_SUCCESS.
-                This would mean that the value is out of range, use get_property_info for the valid range.
-            """
+        Raises
+        ------
+        TUCamError
+            If the actual SDK function call does not return TUCAMRET_SUCCESS.
+            This would mean that the value is out of range, use get_property_info for the valid range.
+        """
         self.set_property_value(TUCAM_IDPROP.TUIDP_GLOBALGAIN, gain_idx)
 
     def openCamera(self, idx):
         """
-             This call opens a camera. If multiple cameras are present, set Idx to the desired index (>=0).
-             Only one camera can be open at any time, however the Idx parameter can be used to choose which one.
+        This call opens a camera. If multiple cameras are present, set Idx to the desired index (>=0).
+        Only one camera can be open at any time, however the Idx parameter can be used to choose which one.
 
-             Parameters
-             ----------
-             idx: integer
-               The index of the camera to open, use 0 if only one camera is connected.
+        Parameters
+        ----------
+        idx: integer
+        The index of the camera to open, use 0 if only one camera is connected.
 
-             Returns
-             -------
-             Nothing
+        Returns
+        -------
+        Nothing
 
-             Raises
-             ------
-             TUCamError
-                 If the actual SDK function call does not return TUCAMRET_SUCCESS.
-                 This means that a camera is not connected. be aware that it can take multiple seconds
-                 after switching a camera on before it is recognised.
-             """
+        Raises
+        ------
+        TUCamError
+         If the actual SDK function call does not return TUCAMRET_SUCCESS.
+         This means that a camera is not connected. be aware that it can take multiple seconds
+         after switching a camera on before it is recognised.
+        """
         self.TUCAM_Dev_Open(pointer(self.TUCAMOPEN))
         if 0 == self.TUCAMOPEN.hIdxTUCam:
             logging.debug("Open camera failed")
@@ -1559,24 +1549,24 @@ class TUCamDLL:
 
     def closeCamera(self):
         """
-            This call closes an open camera.
-            It also stops the acquisition thread, if running.
+        This call closes an open camera.
+        It also stops the acquisition thread, if running.
 
-            Parameters
-            ----------
-            None
+        Parameters
+        ----------
+        None
 
-            Returns
-            -------
-            Nothing
+        Returns
+        -------
+        Nothing
 
-            Raises
-            ------
-            TUCamError
-                If the actual SDK function call does not return TUCAMRET_SUCCESS.
-                This means that a camera is not connected. be aware that it can take multiple seconds
-                after switching a camera on before it is recognised.
-            """
+        Raises
+        ------
+        TUCamError
+            If the actual SDK function call does not return TUCAMRET_SUCCESS.
+            This means that a camera is not connected. be aware that it can take multiple seconds
+            after switching a camera on before it is recognised.
+        """
         if 0 != self.TUCAMOPEN.hIdxTUCam:
             self.TUCAM_Dev_Close(self.TUCAMOPEN.hIdxTUCam)
         self.TUCAMOPEN.hIdxTUCam = 0

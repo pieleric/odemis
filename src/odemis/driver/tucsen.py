@@ -1573,7 +1573,7 @@ class TUCamDLL:
 
     # functions to apply parameters to the actual hardware:
 
-    def _get_max_resolution(self, res_idx: int) -> Tuple[Tuple[int, int], int]:
+    def get_max_resolution(self, res_idx: int) -> Tuple[Tuple[int, int], int]:
         """
             Helper function for setResolution
             """
@@ -1586,7 +1586,7 @@ class TUCamDLL:
         else:
             raise ValueError("Invalid value for res_idx set")
 
-    def _get_resolution_index(self, binning: Tuple[int, int]) -> int:
+    def get_resolution_index(self, binning: Tuple[int, int]) -> int:
         """
         Converts a binning tuple into a resolution index.
         :return: The resolution index as expected by _applyResolution()
@@ -1600,14 +1600,14 @@ class TUCamDLL:
         else:
             raise ValueError(f"Invalid value for binning {binning}")
 
-    def _applyResolution(self, res_idx: int) -> None:
+    def set_resolution(self, res_idx: int) -> None:
         """
         :param res_idx: the selected resolution index (essentially affects the binning)
         :return:
         """
         self.set_capability_value(TUCAM_IDCAPA.TUIDC_RESOLUTION, res_idx)
 
-    def _applyROI(self, roi: Tuple[int, int, int, int], translation: Tuple[int, int]):
+    def set_roi(self, roi: Tuple[int, int, int, int], translation: Tuple[int, int]):
         """
         :param roi: left, top, width, height, in px (from 0) in the current resolution defined by
         the "resolution index" (aka binning)
@@ -1630,7 +1630,7 @@ class TUCamDLL:
             roi_parm.nHOffset, roi_parm.nVOffset, roi_parm.nWidth, roi_parm.nHeight)
             raise
 
-    def _applyFanSpeed(self, fan_speed: int) -> None:
+    def set_fan_speed(self, fan_speed: int) -> None:
         """
         :param fan_speed:
         0: "High"
@@ -1640,7 +1640,7 @@ class TUCamDLL:
         """
         self.set_capability_value(TUCAM_IDCAPA.TUIDC_FAN_GEAR, fan_speed)
 
-    def _applyExposureTime(self, exp_time: float) -> None:
+    def set_exposure_time(self, exp_time: float) -> None:
         """
         :param exp_time: in s
         """
@@ -1722,7 +1722,7 @@ class TUCamDLL:
         self.TUCAM_Cap_Stop(self.TUCAMOPEN.hIdxTUCam)
         self.TUCAM_Buf_Release(self.TUCAMOPEN.hIdxTUCam)
 
-    def _applyTargetTemperature(self, temp: float) -> None:
+    def set_target_temperature(self, temp: float) -> None:
         """
         :param temp: in °C
         """
@@ -1739,7 +1739,7 @@ class TUCamDLL:
         temp_hw = float((temp + 50) * 10)
         self.set_property_value(TUCAM_IDPROP.TUIDP_TEMPERATURE, temp_hw)
 
-    def getTargetTemperatureRange(self) -> Tuple[float, float, float, float]:
+    def get_target_temperature_range(self) -> Tuple[float, float, float, float]:
         """
            Returns info on the range of the target temperature
            :return: min, max, default, step, in °C
@@ -1757,7 +1757,7 @@ class TUCamDLL:
             return targt / 10 - 50
         return target_to_c(mn), target_to_c(mx), target_to_c(dft), step / 10
 
-    def getExposureTimeRange(self) -> Tuple[float, float, float, float]:
+    def get_exposure_time_range(self) -> Tuple[float, float, float, float]:
         """
         Returns info on the range of the exposure time.
 
@@ -1780,7 +1780,7 @@ class TUCamDLL:
         mn, mx, dft, step = self.get_property_info(TUCAM_IDPROP.TUIDP_EXPOSURETM)
         return mn / 1000, mx / 1000, dft / 1000, step / 1000  # s
 
-    def getExposureTime(self) -> float:
+    def get_exposure_time(self) -> float:
         """
         Reads the actual exposure time from the hardware.
 
@@ -1796,7 +1796,7 @@ class TUCamDLL:
         """
         return self.get_property_value(TUCAM_IDPROP.TUIDP_EXPOSURETM) / 1000
 
-    def getTemperature(self) -> float:
+    def get_temperature(self) -> float:
         """
         Returns actual temperature
 
@@ -1813,7 +1813,7 @@ class TUCamDLL:
         # When reading, it's directly in °C
         return self.get_property_value(TUCAM_IDPROP.TUIDP_TEMPERATURE)
 
-    def getBlackLevel(self) -> int:
+    def get_black_level(self) -> int:
         """
         Returns black level value (ie, the value returned when signal is zero)
         :return: black level value
@@ -1821,13 +1821,13 @@ class TUCamDLL:
         # Not implemented on the Dhyana 400 BSI!
         return int(self.get_property_value(TUCAM_IDPROP.TUIDP_BLACKLEVEL))
 
-    def getModelName(self) -> str:
+    def get_model_name(self) -> str:
         """
         Returns type of camera
         """
         return self.get_camera_info_astext(TUCAM_IDINFO.TUIDI_CAMERA_MODEL)
 
-    def getSwVersion(self) -> str:
+    def get_sw_version(self) -> str:
         """
         Returns API version on camera
         """
@@ -2069,13 +2069,13 @@ class TUCam(model.DigitalCamera):
         self._open_camera(device)
 
         # drivers/hardware info
-        hw_name = self._dll.getModelName()
+        hw_name = self._dll.get_model_name()
         sn = self._dll.getSerialNumber()
         if not "Dhyana 400BSI" in hw_name:
             logging.warning("Camera model %s not tested with Odemis, proceed with caution", hw_name)
         self._hwVersion = f"{hw_name} (S/N {sn})"
         self._metadata[model.MD_HW_NAME] = self._hwVersion
-        self._swVersion = self._dll.getSwVersion()
+        self._swVersion = self._dll.get_sw_version()
         self._metadata[model.MD_SW_VERSION] = self._swVersion
         self._metadata[model.MD_DET_TYPE] = model.MD_DT_INTEGRATING
 
@@ -2092,7 +2092,7 @@ class TUCam(model.DigitalCamera):
         self._prev_exposure_time = None
 
         # Max resolution depends on the binning, so to know the max resolution, need to set binning to 1x1
-        max_res, _ = self._dll._get_max_resolution(0)
+        max_res, _ = self._dll.get_max_resolution(0)
         self._metadata[model.MD_SENSOR_SIZE] = self._transposeSizeToUser(max_res)
         self._dll.setGlobalGain(0)  # HDR mode, 16 bits
         # Note: the "IMGMODESELECT" property also affects the bit depth. By default, it is set to 2
@@ -2138,13 +2138,13 @@ class TUCam(model.DigitalCamera):
         self._set_binning(self.binning.value)
         self._set_resolution(self.resolution.value)
 
-        mn, mx, _, self._exp_step = self._dll.getExposureTimeRange()
+        mn, mx, _, self._exp_step = self._dll.get_exposure_time_range()
         self.exposureTime = model.FloatContinuous(1.0, (mn, mx),
                                                   unit="s", setter=self._set_exposure_time)
         self._set_exposure_time(self.exposureTime.value)
 
         # Current temperature
-        current_temp = self._dll.getTemperature()
+        current_temp = self._dll.get_temperature()
         self.temperature = model.FloatVA(current_temp, unit="°C", readonly=True)
         self._metadata[model.MD_SENSOR_TEMP] = current_temp
         self.temp_timer = util.RepeatingTimer(10, self._update_temperature_va,
@@ -2152,7 +2152,7 @@ class TUCam(model.DigitalCamera):
         self.temp_timer.start()
 
         # Dhyana max cooling is -50°C, according to SDK, and -45°C according to specs
-        mn, mx, dft, _ = self._dll.getTargetTemperatureRange()
+        mn, mx, dft, _ = self._dll.get_target_temperature_range()
         self.targetTemperature = model.FloatContinuous(dft, (mn, mx), unit="°C",
                                                        setter=self._set_target_temperature)
         self._set_target_temperature(dft)
@@ -2203,7 +2203,7 @@ class TUCam(model.DigitalCamera):
         """
         to be called at regular interval to update the temperature
         """
-        temp = self._dll.getTemperature()
+        temp = self._dll.get_temperature()
         self._metadata[model.MD_SENSOR_TEMP] = temp
         # it's read-only, so we change it only via _value
         self.temperature._value = temp
@@ -2238,7 +2238,7 @@ class TUCam(model.DigitalCamera):
         new_res = (int(round(old_resolution[0] * change[0])),
                    int(round(old_resolution[1] * change[1])))
 
-        self._resolution_idx = self._dll._get_resolution_index(binning)
+        self._resolution_idx = self._dll.get_resolution_index(binning)
 
         # The low-level settings have been updated, so the resolution and translation setters can
         # use it to know the new binning.
@@ -2260,7 +2260,7 @@ class TUCam(model.DigitalCamera):
         # The X resolution has to be a multiple of 8
         res = res[0] - (res[0] % 8), res[1]
         # Clip, according to the current binning (but cannot use .binning VA, as it might not be updated)
-        max_res, _ = self._dll._get_max_resolution(self._resolution_idx)  # depends on the binning
+        max_res, _ = self._dll.get_max_resolution(self._resolution_idx)  # depends on the binning
         min_res = MIN_RES_DHYANA_400BSI
         res = (min(max(min_res[0], res[0]), max_res[0]),
                min(max(min_res[1], res[1]), max_res[1]))
@@ -2285,7 +2285,7 @@ class TUCam(model.DigitalCamera):
         # compute the min/max of the shift. It's the same as the margin between
         # the centered ROI and the border, taking into account the binning.
         max_res = self._shape[:2]
-        _, binning = self._dll._get_max_resolution(self._resolution_idx)
+        _, binning = self._dll.get_max_resolution(self._resolution_idx)
         res = self._roi[2:]  # current resolution
         max_tran = ((max_res[0] - res[0] * binning) // 2,
                     (max_res[1] - res[1] * binning) // 2)
@@ -2329,7 +2329,7 @@ class TUCam(model.DigitalCamera):
         return value
 
     def _set_target_temperature(self, value: float) -> float:
-        self._dll._applyTargetTemperature(value)
+        self._dll.set_target_temperature(value)
         return value
 
     def _set_fan_speed(self, value: float) -> float:
@@ -2345,7 +2345,7 @@ class TUCam(model.DigitalCamera):
         else:
             raise ValueError("invalid fan speed value")
 
-        self._dll._applyFanSpeed(fan_speed)
+        self._dll.set_fan_speed(fan_speed)
         value = 1.0 - (fan_speed / 3)  # Convert back to the accepted value
         return value
 
@@ -2363,22 +2363,22 @@ class TUCam(model.DigitalCamera):
 
         res_idx = self._resolution_idx
         if res_idx != self._prev_resolution_idx:
-            self._dll._applyResolution(self._resolution_idx)
-            _, binning = self._dll._get_max_resolution(self._resolution_idx)
+            self._dll.set_resolution(self._resolution_idx)
+            _, binning = self._dll.get_max_resolution(self._resolution_idx)
             self._metadata[model.MD_BINNING] = (binning, binning)
             self._prev_resolution_idx = res_idx
 
         roi, trans = self._roi, self._translation
         if (roi, trans) != self._prev_roi_trans:
-            self._dll._applyROI(self._roi, self._translation)
+            self._dll.set_roi(self._roi, self._translation)
             self._prev_roi_trans = (roi, trans)
 
         exp_time = self._prev_exposure_time
         if self._exposure_time != exp_time:
-            self._dll._applyExposureTime(self._exposure_time)
+            self._dll.set_exposure_time(self._exposure_time)
             self._prev_exposure_time = exp_time
 
-            exp = self._dll.getExposureTime()
+            exp = self._dll.get_exposure_time()
             self._metadata[model.MD_EXP_TIME] = exp
 
             # update .exposureTime VA with actual value read from hardware
@@ -2387,7 +2387,7 @@ class TUCam(model.DigitalCamera):
                 self.exposureTime._value = exp
                 self.exposureTime.notify(exp)
         else:
-            exp = self._dll.getExposureTime()
+            exp = self._dll.get_exposure_time()
 
         return exp
 

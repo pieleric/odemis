@@ -212,7 +212,8 @@ class VirtualTestCam(metaclass=ABCMeta):
 
         # Check the translation can be changed
         self.camera.binning.value = (2, 2)
-        self.camera.resolution.value = (16, 16)
+        small_res = self.camera.resolution.clip((16, 16))
+        self.camera.resolution.value = small_res
         self.camera.translation.value = (-10, 3) # values are small enough they should always be fine
         im = self.camera.data.get()
         self.assertEqual(self.camera.translation.value, (-10, 3))
@@ -234,7 +235,7 @@ class VirtualTestCam(metaclass=ABCMeta):
 
         self.camera.binning.value = (2, 2)
         self.camera.updateMetadata({model.MD_PIXEL_SIZE: (2e-6, 2e-6)})
-        self.camera.resolution.value = (16, 16)
+        self.camera.resolution.value = small_res
         im = self.camera.data.get()
         self.assertEqual(im.metadata[model.MD_POS], orig_md[model.MD_POS])
 

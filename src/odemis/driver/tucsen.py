@@ -826,14 +826,17 @@ CONTEXT_CALLBACK = eval('CFUNCTYPE')(c_void_p)
 
 class TUCamDLL:
     def __init__(self):
-        if os.name == "nt":
-            # Note: use WinDLL (isntead of OleDLL), so that there is no auto errcheck on HRESULT
-            # 32bit
-            # self.TUSDKdll = WinDLL("./lib/x86/TUCam.dll")
-            # 64bit
-            self.TUSDKdll = WinDLL("./lib/x64/TUCam.dll")
-        else:
-            self.TUSDKdll = CDLL("libTUCam.so.1")
+        try:
+            if os.name == "nt":
+                # Note: use WinDLL (isntead of OleDLL), so that there is no auto errcheck on HRESULT
+                # 32bit
+                # self.TUSDKdll = WinDLL("./lib/x86/TUCam.dll")
+                # 64bit
+                self.TUSDKdll = WinDLL("./lib/x64/TUCam.dll")
+            else:
+                self.TUSDKdll = CDLL("libTUCam.so.1")
+        except OSError:
+            raise OSError("Could not load TUCam library. Make sure the Tucsen SDK is installed with: sudo apt install libtucam")
 
         if hasattr(self.TUSDKdll, "TUCAM_Api_Init"):
             # "Simple" case: C functions are available

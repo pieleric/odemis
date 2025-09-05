@@ -34,8 +34,8 @@
 #        device: "fake",
     },
     properties: {
-#        targetTemperature: 25,  # °C, to disable active cooling
-#        fanSpeed: 0,  # To disable the fan
+        targetTemperature: 10,  # °C, to reduce active cooling
+        fanSpeed: 0.2,  # To reduce the fan
     }
 }
 

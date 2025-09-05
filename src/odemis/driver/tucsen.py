@@ -40,6 +40,13 @@ from odemis import model, util
 class TUCamError(IOError):
     pass
 
+
+PXS_DHYANA_400BSI = (6.5e-6, 6.5e-6)  # pixel size in m
+
+# X resolution has to be a multiple of 8
+MIN_RES_DHYANA_400BSI = (48, 8)  # min ROI in px (X, Y), true for any binning
+
+
 tucam_error_codes = {
     0x00000001: "success code",
     0x00000002: "No errors, frame information received by vendor",
@@ -1691,9 +1698,9 @@ class TUCamDLL:
         TUCamError
             If the actual SDK function call does not return TUCAMRET_SUCCESS.
         """
-        # TODO: timeout doesn't seem to work, it always waits very long
+        # FIXME: timeout doesn't seem to work, it always waits until the image is received
+        # Use TUCAM_Buf_AbortWait to work around this?
         self.TUCAM_Buf_WaitForFrame(self.TUCAMOPEN.hIdxTUCam, pointer(self.m_frame), int(timeout * 1000))
-        # self.m_frameidx += 1
 
         # Copy the data into a NumPy array of the same length and dtype
         p = cast(self.m_frame.pBuffer + self.m_frame.usOffset, POINTER(c_uint16))
@@ -1762,41 +1769,41 @@ class TUCamDLL:
 
     def getExposureTimeRange(self) -> Tuple[float, float, float, float]:
         """
-            Returns info on the range of the exposure time.
+        Returns info on the range of the exposure time.
 
-            Parameters
-            ----------
-            None
+        Parameters
+        ----------
+        None
 
-            Returns
-            -------
-            tuple of floats, min, max, default, step, in s
+        Returns
+        -------
+        tuple of floats, min, max, default, step, in s
 
 
-            Raises
-            ------
-            TUCamError
-                If the actual SDK function call does not return TUCAMRET_SUCCESS.
-                See the exception for the actual cause.
-            """
+        Raises
+        ------
+        TUCamError
+            If the actual SDK function call does not return TUCAMRET_SUCCESS.
+            See the exception for the actual cause.
+        """
         # Values are in ms
         mn, mx, dft, step = self.get_property_info(TUCAM_IDPROP.TUIDP_EXPOSURETM)
         return mn / 1000, mx / 1000, dft / 1000, step / 1000  # s
 
     def getExposureTime(self) -> float:
         """
-          Reads the actual exposure time from the hardware.
+        Reads the actual exposure time from the hardware.
 
-          Returns
-          -------
-          current exposure time, float (in s)
+        Returns
+        -------
+        current exposure time, float (in s)
 
-          Raises
-          ------
-          TUCamError
-              If the actual SDK function call does not return TUCAMRET_SUCCESS.
-              See the exception for the actual cause.
-          """
+        Raises
+        ------
+        TUCamError
+          If the actual SDK function call does not return TUCAMRET_SUCCESS.
+          See the exception for the actual cause.
+        """
         return self.get_property_value(TUCAM_IDPROP.TUIDP_EXPOSURETM) / 1000
 
     def getTemperature(self) -> float:
@@ -1826,8 +1833,8 @@ class TUCamDLL:
 
     def getModelName(self) -> str:
         """
-            Returns type of camera
-            """
+        Returns type of camera
+        """
         return self.get_camera_info_astext(TUCAM_IDINFO.TUIDI_CAMERA_MODEL)
 
     def getSwVersion(self) -> str:
@@ -1843,6 +1850,7 @@ class TUCamDLL:
         self.TUCAM_Reg_Read(self.TUCAMOPEN.hIdxTUCam, TUCAMREGRW)
         sn = ctypes.string_at(pSN).decode('utf-8')
         return sn
+
 
 class FakeTUCamDLL:
     """
@@ -1987,12 +1995,6 @@ class FakeTUCamDLL:
     def getTargetTemperatureRange(self):
         return (0.0, 1000.0, 400.0, 1.0) # FIXME
 
-    def setGain(self, value):
-        self._gain = value
-
-    def getGain(self):
-        return self._gain
-
     def getExposureTime(self):
         # the fake dll returns the set exposure time, the real one reads
         # it from the hardware
@@ -2020,10 +2022,6 @@ class FakeTUCamDLL:
     def getSerialNumber(self) -> str:
         return "FAKE123456"
 
-PXS_DHYANA_400BSI = (6.5e-6, 6.5e-6)  # pixel size in m
-
-# X resolution has to be a multiple of 8
-MIN_RES_DHYANA_400BSI = (48, 8)  # min ROI in px (X, Y), true for any binning
 
 # Acquisition control messages
 GEN_START = "S"  # Start acquisition
@@ -2096,6 +2094,12 @@ class TUCam(model.DigitalCamera):
         self._translation = (0, 0)
         self._roi = (0, 0, 2048, 2010)
         self._exposure_time = 1.0
+
+        # Keep track of previous settings applied to the hardware, to avoid unnecessary updates
+        # Start with None to force initial update
+        self._prev_resolution_idx = None
+        self._prev_roi_trans = None
+        self._prev_exposure_time = None
 
         # Max resolution depends on the binning, so to know the max resolution, need to set binning to 1x1
         max_res, _ = self._dll._get_max_resolution(0)
@@ -2345,14 +2349,14 @@ class TUCam(model.DigitalCamera):
         # 1: "Medium"
         # 2: "Low"
         # 3: "Off (Water Cooling)"
-        fan_speed_hw = int((1.0 - value) * 3)
+        fan_speed_hw = round((1.0 - value) * 3)
         if 0 <= value <= 3:
             fan_speed = fan_speed_hw
-            value = 1.0 - (fan_speed / 3)
         else:
             raise ValueError("invalid fan speed value")
 
         self._dll._applyFanSpeed(fan_speed)
+        value = 1.0 - (fan_speed / 3)  # Convert back to the accepted value
         return value
 
     def _update_settings(self, acquiring=False) -> float:
@@ -2367,19 +2371,33 @@ class TUCam(model.DigitalCamera):
           """
         logging.debug("Updating camera settings")
 
-        self._dll._applyResolution(self._resolution_idx)
-        _, binning = self._dll._get_max_resolution(self._resolution_idx)
-        self._metadata[model.MD_BINNING] = (binning, binning)
-        self._dll._applyROI(self._roi, self._translation)
-        self._dll._applyExposureTime(self._exposure_time)
+        res_idx = self._resolution_idx
+        if res_idx != self._prev_resolution_idx:
+            self._dll._applyResolution(self._resolution_idx)
+            _, binning = self._dll._get_max_resolution(self._resolution_idx)
+            self._metadata[model.MD_BINNING] = (binning, binning)
+            self._prev_resolution_idx = res_idx
 
-        exp = self._dll.getExposureTime()
-        self._metadata[model.MD_EXP_TIME] = exp
-        # update .exposureTime VA with actual value read from hardware
-        if self.exposureTime.value != exp:
-            logging.debug("Exposure time VA updated from %f to %f", self.exposureTime.value, exp)
-            self.exposureTime._value = exp
-            self.exposureTime.notify(exp)
+        roi, trans = self._roi, self._translation
+        if (roi, trans) != self._prev_roi_trans:
+            self._dll._applyROI(self._roi, self._translation)
+            self._prev_roi_trans = (roi, trans)
+
+        exp_time = self._prev_exposure_time
+        if self._exposure_time != exp_time:
+            self._dll._applyExposureTime(self._exposure_time)
+            self._prev_exposure_time = exp_time
+
+            exp = self._dll.getExposureTime()
+            self._metadata[model.MD_EXP_TIME] = exp
+
+            # update .exposureTime VA with actual value read from hardware
+            if self.exposureTime.value != exp:
+                logging.debug("Exposure time VA updated from %f to %f", self.exposureTime.value, exp)
+                self.exposureTime._value = exp
+                self.exposureTime.notify(exp)
+        else:
+            exp = self._dll.getExposureTime()
 
         return exp
 
@@ -2409,7 +2427,8 @@ class TUCam(model.DigitalCamera):
                 return should_stop
 
             try:
-                array = self._dll.captureFrame(timeout=0.1)  # Never wait too long
+                # DEBUG
+                array = self._dll.captureFrame(timeout=0.001)  # Never wait too long
                 logging.debug("Received image of %s after %s s", array.shape,
                               time.time() - start_t)
                 # An image!

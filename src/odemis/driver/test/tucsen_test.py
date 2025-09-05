@@ -23,6 +23,7 @@ Odemis. If not, see http://www.gnu.org/licenses/.
 import logging
 import os
 import unittest
+import time
 
 from cam_test_abs import VirtualTestCam, VirtualStaticTestCam
 from odemis.driver import tucsen
@@ -61,6 +62,18 @@ class TestTUCam(VirtualTestCam, unittest.TestCase):
         #DEBUG
         cls.camera.targetTemperature.value = 20
         cls.camera.fanSpeed.value = 0.5 # DEBUG
+
+    def test_acquire_long(self):
+        self.assertEqual(len(self.camera.shape), 3)
+        self.camera.exposureTime.value = self.camera.exposureTime.clip(1.0)
+        exposure = self.camera.exposureTime.value
+
+        start = time.time()
+        im = self.camera.data.get()
+        duration = time.time() - start
+
+    def test_fan(self):
+        super().test_fan()
 
     def test_resolution_rounding(self):
         self.camera.resolution.value = (199, 103)

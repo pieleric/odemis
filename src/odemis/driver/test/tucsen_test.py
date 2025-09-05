@@ -55,6 +55,18 @@ class TestTUCam(VirtualTestCam, unittest.TestCase):
     camera_type = tucsen.TUCam
     camera_kwargs = KWARGS
 
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        #DEBUG
+        cls.camera.targetTemperature.value = 20
+        cls.camera.fanSpeed.value = 0.5 # DEBUG
+
+    def test_resolution_rounding(self):
+        self.camera.resolution.value = (199, 103)
+        # horizontal res (== second dim as it's transposed) is rounded to multiple of 8
+        # vertical res (== first dim as it's transposed) is accepted as is
+        self.assertEqual(self.camera.resolution.value, (199, 96))
 
 if __name__ == '__main__':
     unittest.main()

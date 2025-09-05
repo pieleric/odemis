@@ -24,6 +24,7 @@ import inspect
 import logging
 import os
 import queue
+import tempfile
 import threading
 import time
 import weakref
@@ -1190,17 +1191,13 @@ class TUCamDLL:
             if name.startswith("TUCAM_"):
                 member.errcheck = self._errcheck
 
-        # call init and open
-        self.Path = './'
-        self.TUCAMINIT = TUCAM_INIT(0, self.Path.encode('utf-8'))
         self.TUCAMOPEN = TUCAM_OPEN(0, 0)
 
-        try:
-            self.TUCAM_Api_Init(pointer(self.TUCAMINIT), 5000)
-        except Exception:
-            # TODO: if no camera is connected, this fails. => handle better
-            logging.exception("Failed to init")
-        self._nrCameras = self.TUCAMINIT.uiCamCount
+        # Path where the library will store the camera current settings
+        config_path = tempfile.gettempdir()  # Always writable, and always forgotten next run => perfect!
+        init_args = TUCAM_INIT(0, config_path.encode('utf-8'))
+        self.TUCAM_Api_Init(pointer(init_args), 1000)  # timeout 1s
+        self._nrCameras = init_args.uiCamCount
 
         self._lock = threading.Lock()
 
@@ -1592,6 +1589,20 @@ class TUCamDLL:
         else:
             raise ValueError("Invalid value for res_idx set")
 
+    def _get_resolution_index(self, binning: Tuple[int, int]) -> int:
+        """
+        Converts a binning tuple into a resolution index.
+        :return: The resolution index as expected by _applyResolution()
+        """
+        if binning == (1, 1):
+            return 0
+        elif binning == (2, 2):
+            return 2
+        elif binning == (4, 4):
+            return 3
+        else:
+            raise ValueError(f"Invalid value for binning {binning}")
+
     def _applyResolution(self, res_idx: int) -> None:
         """
         :param res_idx: the selected resolution index (essentially affects the binning)
@@ -1649,14 +1660,6 @@ class TUCamDLL:
         This call starts a capture on an open camera by calling the necessary SDK fucntions.
         Do not use directly, it is part of the cpature thread.
 
-        Parameters
-        ----------
-        None
-
-        Returns
-        -------
-        Nothing
-
         Raises
         ------
         TUCamError
@@ -1670,7 +1673,7 @@ class TUCamDLL:
         self.m_frame.pBuffer = 0
         self.m_frame.ucFormatGet = self.m_frformat.TUFRM_FMT_USUAl.value
         self.m_frame.uiRsdSize = 1
-        self.m_frameidx = 0  # keep counting frames
+        # self.m_frameidx = 0  # keep counting frames
 
         self.TUCAM_Buf_Alloc(self.TUCAMOPEN.hIdxTUCam, pointer(self.m_frame))
         self.TUCAM_Cap_Start(self.TUCAMOPEN.hIdxTUCam, self.m_capmode.TUCCM_SEQUENCE.value)
@@ -1688,8 +1691,9 @@ class TUCamDLL:
         TUCamError
             If the actual SDK function call does not return TUCAMRET_SUCCESS.
         """
+        # TODO: timeout doesn't seem to work, it always waits very long
         self.TUCAM_Buf_WaitForFrame(self.TUCAMOPEN.hIdxTUCam, pointer(self.m_frame), int(timeout * 1000))
-        self.m_frameidx += 1
+        # self.m_frameidx += 1
 
         # Copy the data into a NumPy array of the same length and dtype
         p = cast(self.m_frame.pBuffer + self.m_frame.usOffset, POINTER(c_uint16))
@@ -1709,16 +1713,8 @@ class TUCamDLL:
 
     def endCapture(self):
         """
-        This call stops a capture on an open camera by calling the necessary SDK fucntions.
+        This call stops a capture on an open camera by calling the necessary SDK functions.
         Do not use directly, it is part of the capture thread.
-
-        Parameters
-        ----------
-        None
-
-        Returns
-        -------
-        Nothing
 
         Raises
         ------
@@ -1732,10 +1728,10 @@ class TUCamDLL:
     def _applyTargetTemperature(self, temp: float) -> None:
         """
         :param temp: in °C
-        :return:
         """
         # Dhyana 400 BSI formula: (not as documented in SDK)
-        # Theoretical range is between -50°C and +50°C, but camera cannot physically cool below -45°C
+        # Theoretical range is between -50°C and +50°C, but camera cannot physically cool below
+        # ambient temperature - 45°C with water cooling, or abient temperature - 35°C with air cooling.
         # Hardware accepts values between 0 and 1000.
         # t_c = t_hw / 10 - 50
         # t_hw = (t_c + 50) * 10
@@ -1805,24 +1801,28 @@ class TUCamDLL:
 
     def getTemperature(self) -> float:
         """
-             Returns actual temperature
+        Returns actual temperature
 
-             Parameters
-             ----------
-             None
+        Returns
+        -------
+        current temperature, float  °C
 
-             Returns
-             -------
-             current temperature, float  °C
-
-             Raises
-             ------
-             TUCamError
-                 If the actual SDK function call does not return TUCAMRET_SUCCESS.
-                 See the exception for the actual cause.
-             """
+        Raises
+        ------
+        TUCamError
+            If the actual SDK function call does not return TUCAMRET_SUCCESS.
+            See the exception for the actual cause.
+        """
         # When reading, it's directly in °C
         return self.get_property_value(TUCAM_IDPROP.TUIDP_TEMPERATURE)
+
+    def getBlackLevel(self) -> int:
+        """
+        Returns black level value (ie, the value returned when signal is zero)
+        :return: black level value
+        """
+        # Not implemented on the Dhyana 400 BSI!
+        return int(self.get_property_value(TUCAM_IDPROP.TUIDP_BLACKLEVEL))
 
     def getModelName(self) -> str:
         """
@@ -1832,8 +1832,8 @@ class TUCamDLL:
 
     def getSwVersion(self) -> str:
         """
-            Returns API version on camera
-            """
+        Returns API version on camera
+        """
         return self.get_camera_info_astext(TUCAM_IDINFO.TUIDI_VERSION_API)
 
     def getSerialNumber(self) -> str:
@@ -1861,9 +1861,6 @@ class FakeTUCamDLL:
         self._parametersChanged = True
         self._frameIdx = 0
         self._nrCameras = 1     # fake one camera.
-
-        # call init and open
-        self.Path = './'
 
     def TUCAM_Api_Uninit(self):
         pass
@@ -2068,46 +2065,52 @@ class TUCam(model.DigitalCamera):
 
         # Queue to control the acquisition thread
         self._genmsg = queue.Queue()  # GEN_* or float
+        self._need_settings_update = False
 
         if device == "fake":
             self._dll = FakeTUCamDLL()
         else:
-            # TODO: should raise nice HwError if no camera
-            self._dll = TUCamDLL()
+            try:
+                self._dll = TUCamDLL()
+            except TUCamError as ex:
+                # Weirdly, the TUCAM_Api_Init() can fail if no camera is connected
+                if ex.errno == TUCAMRET_Enum.TUCAMRET_NOT_INIT.value:
+                    raise model.HwError("No Tucsen camera found, check the camera is turned on")
+                raise
+
         self._open_camera(device)
 
         # drivers/hardware info
         hw_name = self._dll.getModelName()
+        sn = self._dll.getSerialNumber()
         if not "Dhyana 400BSI" in hw_name:
             logging.warning("Camera model %s not tested with Odemis, proceed with caution", hw_name)
-        self._metadata[model.MD_HW_NAME] = hw_name
+        self._hwVersion = f"{hw_name} (S/N {sn})"
+        self._metadata[model.MD_HW_NAME] = self._hwVersion
         self._swVersion = self._dll.getSwVersion()
         self._metadata[model.MD_SW_VERSION] = self._swVersion
-        # hwv = self._dll.getHwVersion()  # TODO
-        # self._metadata[model.MD_HW_VERSION] = hwv
-        # self._hwVersion = "%s (%s)" % (hw_name, hwv)
-        self._hwVersion = hw_name
         self._metadata[model.MD_DET_TYPE] = model.MD_DT_INTEGRATING
 
         # camera parameters: values to be set when update_settings() is called
         self._resolution_idx = 0  # 0 = 2048,2040 1 = 2048,2040 Enhance  2= 1024, 1020 2x2  3 = 512, 510 4x4
         self._translation = (0, 0)
         self._roi = (0, 0, 2048, 2010)
-        self._targetTemperature = 0.0
-        self._fan_speed = 0  # 0 = max, 3 = off (water cooling)
-        self._exposureTime = 1.0
+        self._exposure_time = 1.0
 
         # Max resolution depends on the binning, so to know the max resolution, need to set binning to 1x1
-        max_res, _ = self._dll._get_max_resolution(1)
+        max_res, _ = self._dll._get_max_resolution(0)
         self._metadata[model.MD_SENSOR_SIZE] = self._transposeSizeToUser(max_res)
         self._dll.setGlobalGain(0)  # HDR mode, 16 bits
         # Note: the "IMGMODESELECT" property also affects the bit depth. By default, it is set to 2
         # (HDR), which is what we want (16 bits).
         self._metadata[model.MD_BPP] = 16
+
+        # TODO: rolling shutter is disabled by default, but can be enabled via the TUIDC_ROLLINGSCANMODE
+
+        # TUIDP_BLACKLEVEL doesn't seem to be implemented on the Dhyana 400BSI, but test show it's 100
         self._metadata[model.MD_BASELINE] = 100  # average value for signal == 0
 
         self._shape = max_res + (2 ** 16,)  # _shape always uses the hardware order
-
 
         # The Dhyana supports changing from HDR to low/high gains 12 bits. We could provide a .gain
         # VA to select between these settings, but it's typically not useful
@@ -2141,7 +2144,7 @@ class TUCam(model.DigitalCamera):
         self._set_binning(self.binning.value)
         self._set_resolution(self.resolution.value)
 
-        mn, mx, _, _ = self._dll.getExposureTimeRange()
+        mn, mx, _, self._exp_step = self._dll.getExposureTimeRange()
         self.exposureTime = model.FloatContinuous(1.0, (mn, mx),
                                                   unit="s", setter=self._set_exposure_time)
         self._set_exposure_time(self.exposureTime.value)
@@ -2182,6 +2185,7 @@ class TUCam(model.DigitalCamera):
         """
         if self._dll:
             if self._acq_thread:
+                self._genmsg.put(GEN_TERM)
                 self._acq_thread.join(5)
                 self._acq_thread = None
 
@@ -2220,58 +2224,11 @@ class TUCam(model.DigitalCamera):
         # TODO: support selecting the device via its serial number
         try:
             self._dll.openCamera(0)
-        except (OSError, TUCamError):
+        except (OSError, TUCamError) as ex:
             logging.exception("Failed to open Tucsen camera %s", device)
-            raise model.HwError("No Tucsen camera found, check the camera is turned on")
+            raise model.HwError("No Tucsen camera found, check the camera is turned on") from ex
 
     # camera properties
-
-    def setResolution(self, res):
-        """
-            The DHYANA camera supports only one resolution of 2048,2010.
-            We simulate different resolutions by taking a roi.
-
-            The user should set the binning first (1,2,4). From the binning,
-            a maximum resolution results, to which the requested resolution is clipped.
-            After that, if the resolution requested is less, we set a roi and apply that,
-
-            Parameters
-            ----------
-            Res: tuple[int,int]
-                call with x, y resolution to set.
-
-            Returns
-            -------
-            Actual resolution, might be different (clipped).
-
-            Raises
-            ------
-            TUCamError
-                If the actual SDK function call does not return TUCAMRET_SUCCESS.
-                See the exception for the actual cause.
-            """
-        max_res, _ = self._dll._get_max_resolution(self._resolution_idx)  # depends on the binning
-        if res[0] > max_res[0]:
-            res[0] = max_res[0]
-        if res[1] > max_res[1]:
-            res[1] = max_res[1]
-
-        self._roi = (int(max_res[0] / 2) - int(res[0] / 2),  # left
-                     int(max_res[1] / 2) - int(res[1] / 2),  # top
-                     res[0],  # width
-                     res[1])  # height
-
-        # clip translation. not allowed to walk outside camera ROI.
-        clipped_translation_x = self._translation[0]
-        if self._roi[0] + self._roi[2] + clipped_translation_x > max_res[0]:
-            clipped_translation_x = max_res[0] - self._roi[0] - self._roi[2]
-        clipped_translation_y = self._translation[1]
-        if self._roi[1] + self._roi[3] + clipped_translation_y > max_res[1]:
-            clipped_translation_y = max_res[0] - self._roi[0] - self._roi[2]
-        self._translation = (clipped_translation_x, clipped_translation_y)
-
-        return res
-
     def _set_binning(self, value: Tuple[int, int]) -> Tuple[int, int]:
         """
         Called when "binning" VA is modified. It actually modifies the camera binning.
@@ -2287,15 +2244,7 @@ class TUCam(model.DigitalCamera):
         new_res = (int(round(old_resolution[0] * change[0])),
                    int(round(old_resolution[1] * change[1])))
 
-        # TODO: move the adapter here (ie: store resolution_id & call should_update_settings)
-        if binning == (1, 1):
-            self._resolution_idx = 0
-        elif binning == (2, 2):
-            self._resolution_idx = 2
-        elif binning == (4, 4):
-            self._resolution_idx = 3
-        else:
-            raise Exception("Invalid value for binning set")
+        self._resolution_idx = self._dll._get_resolution_index(binning)
 
         # The low-level settings have been updated, so the resolution and translation setters can
         # use it to know the new binning.
@@ -2312,17 +2261,22 @@ class TUCam(model.DigitalCamera):
         :param value: requested resolution
         :return: accepted resolution
         """
-        # resolution, call with (2048, 2040) or lower
         res = self._transposeSizeFromUser(value)
 
-        # Use the low-level binning, because in case we are called from the binning setter, the VA
-        # is not yet updated
+        # The X resolution has to be a multiple of 8
+        res = res[0] - (res[0] % 8), res[1]
+        # Clip, according to the current binning (but cannot use .binning VA, as it might not be updated)
         max_res, _ = self._dll._get_max_resolution(self._resolution_idx)  # depends on the binning
+        min_res = MIN_RES_DHYANA_400BSI
+        res = (min(max(min_res[0], res[0]), max_res[0]),
+               min(max(min_res[1], res[1]), max_res[1]))
 
-        res = (min(res[0], max_res[0]), min(res[1], max_res[1]))
-        self.setResolution(res)
+        self._roi = (int(max_res[0] / 2) - int(res[0] / 2),  # left
+                     int(max_res[1] / 2) - int(res[1] / 2),  # top
+                     res[0],  # width
+                     res[1])  # height
 
-        self.translation.value = self.translation.value # force re-check
+        self.translation.value = self.translation.value  # force re-check
         self._should_apply_settings()
         return self._transposeSizeToUser(res)
 
@@ -2371,9 +2325,17 @@ class TUCam(model.DigitalCamera):
 
         return phyt
 
-    def _set_target_temperature(self, value: float) -> float:
-        self._targetTemperature = value
+    def _set_exposure_time(self, value: float) -> float:
+        # Round value to the nearest step
+        self._exposure_time = value
+        # Try to guess the value that will be actually set
+        value = round(value / self._exp_step) * self._exp_step
+        self.exposureTime.clip(value)  # to be extra sure it's in range
         self._should_apply_settings()
+        return value
+
+    def _set_target_temperature(self, value: float) -> float:
+        self._dll._applyTargetTemperature(value)
         return value
 
     def _set_fan_speed(self, value: float) -> float:
@@ -2385,52 +2347,41 @@ class TUCam(model.DigitalCamera):
         # 3: "Off (Water Cooling)"
         fan_speed_hw = int((1.0 - value) * 3)
         if 0 <= value <= 3:
-            self._fan_speed = fan_speed_hw
-            value = 1.0 - (self._fan_speed / 3)
+            fan_speed = fan_speed_hw
+            value = 1.0 - (fan_speed / 3)
         else:
-            raise Exception("invalid fan speed value")
+            raise ValueError("invalid fan speed value")
 
-        self._should_apply_settings()
+        self._dll._applyFanSpeed(fan_speed)
         return value
 
-    def _set_exposure_time(self, value: float) -> float:
-        self._exposureTime = value
-        self._should_apply_settings()
-        return value
-
-    def _update_settings(self, acquiring=False):
+    def _update_settings(self, acquiring=False) -> float:
         """
           This call applies the parameters that have been set (targetTemperature, resolution, binning, roi)
-          To the actual hardware, this function calls all above _applyxxxx functions in sequence.
 
-          Parameters
-          ----------
-          fromThread: bool
+          :param acquiring:
             True if called from the acquisition thread, false otherwise.
 
-
-          Raises
-          ------
-          Exception
-             If the camera is not opened or one of the set parameters is out of range.
-          TUCamError
-              If the actual SDK function call does not return TUCAMRET_SUCCESS.
-              This means that a value is out of range, see info in the exception.
+          :return: actual exposure time set (in s)
+          :raises TUCamError: if some settings failed to be applied.
           """
-
-        # TODO: check if it's possible to do it at any time? Probably, but we also don't save a lot of time
-        self._dll._applyFanSpeed(self._fan_speed)
-        self._dll._applyTargetTemperature(self._targetTemperature)
+        logging.debug("Updating camera settings")
 
         self._dll._applyResolution(self._resolution_idx)
         _, binning = self._dll._get_max_resolution(self._resolution_idx)
+        self._metadata[model.MD_BINNING] = (binning, binning)
         self._dll._applyROI(self._roi, self._translation)
-        self._dll._applyExposureTime(self._exposureTime)
+        self._dll._applyExposureTime(self._exposure_time)
 
         exp = self._dll.getExposureTime()
         self._metadata[model.MD_EXP_TIME] = exp
-        self._metadata[model.MD_BINNING] = (binning, binning)
-        # TODO: update .exposureTime VA with actual value read from hardware
+        # update .exposureTime VA with actual value read from hardware
+        if self.exposureTime.value != exp:
+            logging.debug("Exposure time VA updated from %f to %f", self.exposureTime.value, exp)
+            self.exposureTime._value = exp
+            self.exposureTime.notify(exp)
+
+        return exp
 
     # Acquisition methods
     def _prepare_image_metadata(self) -> Dict[str, Any]:
@@ -2454,7 +2405,7 @@ class TUCam(model.DigitalCamera):
         # Wait until the frame has arrived
         while True:
             should_stop = self._acq_should_stop()
-            if should_stop:
+            if should_stop == GEN_STOP:
                 return should_stop
 
             try:
@@ -2467,7 +2418,7 @@ class TUCam(model.DigitalCamera):
                 return False
             except TUCamError as ex:
                 # Timeout is expected for any exposure time >= 0.1s
-                if ex.errno == TUCAMRET_Enum.TUCAMRET_TIMEOUT:
+                if ex.errno == TUCAMRET_Enum.TUCAMRET_TIMEOUT.value:
                     if time.time() > tend:
                         logging.warning("Timeout after %g s", time.time() - tstart)
                         raise TimeoutError(f"Timeout after {time.time() - tstart} s")
@@ -2479,30 +2430,37 @@ class TUCam(model.DigitalCamera):
     def _acquire_images(self):
         try:
             logging.debug("Starting acquisition")
-            self._update_settings(acquiring=True)
-            need_settings_update = False
-            exp = self.exposureTime.value  # TODO: get from update_settings
+            exp = self._update_settings(acquiring=True)
+            self._need_settings_update = False
             self._dll.startCapture()
 
             # Acquire until requested to stop
             while True:
-                if need_settings_update:
+                if self._need_settings_update:
                     try:
                         self._dll.endCapture()
                     except Exception:
                         logging.debug("Failed to stop capture")
-                    self._update_settings(acquiring=True)
-                    need_settings_update = False
+                    # If multiple settings update requests in a row, flush them
+                    while True:
+                        should_stop = self._acq_should_stop()
+                        if should_stop == GEN_STOP:
+                            logging.debug("Acquisition cancelled")
+                            return
+                        else:
+                            break  # Flushed
+
+                    exp = self._update_settings(acquiring=True)
+                    self._need_settings_update = False
                     self._dll.startCapture()
 
-                should_stop = self._acquire_frame(exp * 2 + 5)  # timeout = 2x exposure + 5s margin
+                # Acquire one frame, with a timeout
+                timeout = exp * 2 + 5  # s, should be more than enough
+                should_stop = self._acquire_frame(timeout)
 
-                if should_stop == GEN_SETTINGS:
-                    need_settings_update = True
-                    continue
-                elif should_stop == GEN_STOP:
+                if should_stop == GEN_STOP:
                     logging.debug("Acquisition cancelled")
-                    break
+                    return
         finally:
             try:
                 self._dll.endCapture()
@@ -2528,15 +2486,12 @@ class TUCam(model.DigitalCamera):
 
         logging.debug("TUCAM acquisition thread ended")
 
-
     # The acquisition is based on a FSM that roughly looks like this:
     # Event\State |   Stopped   |Ready for acq|  Acquiring |  Receiving data |
     #  START      |Ready for acq|     .       |     .      |                 |
     #  Im received|      .      |     .       |Receiving data|       .       |
     #  STOP       |      .      |  Stopped    | Stopped    |    Stopped      |
     #  TERM       |    Final    |   Final     |  Final     |    Final        |
-    # If the acquisition is not synchronized, then the Trigger event in Ready for
-    # acq is considered as a "null" event: it's discarded.
 
     def start_generate(self):
         """
@@ -2600,6 +2555,7 @@ class TUCam(model.DigitalCamera):
             elif msg == GEN_SETTINGS:
                 logging.debug("Updating settings while acquisition is stopped")
                 self._update_settings(acquiring=False)
+                self._need_settings_update = False
                 continue  # wait for more message
             elif msg == GEN_START:
                 return
@@ -2626,8 +2582,8 @@ class TUCam(model.DigitalCamera):
             if msg == GEN_STOP:
                 return msg
             elif msg == GEN_SETTINGS:
-                # TODO: check if more messages are pending
-                return msg
+                self._need_settings_update = True
+                logging.debug("Skipped settings update request while receiving data")
             elif msg == GEN_TERM:
                 raise TerminationRequested()
             else:  # Anything else shouldn't really happen

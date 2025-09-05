@@ -1231,17 +1231,70 @@ class TUCamDLL:
     # gets and sets the physical parameters
 
     def get_info(self, id: TUCAM_IDINFO):
+        """
+            Returns info on an open camera.
+
+            Parameters
+            ----------
+            id : TUCAM_IDINFO
+                The desired information identifier,
+
+            Returns
+            -------
+            str
+
+            Raises
+            ------
+            TUCamError
+                If the actual SDK function call does not return TUCAMRET_SUCCESS
+            """
         tvinfo = TUCAM_VALUE_INFO(id.value, 0, 0, 0)
         self.TUCAM_Dev_GetInfo(self.TUCAMOPEN.hIdxTUCam, pointer(tvinfo))
         return ctypes.string_at(tvinfo.pText).decode('utf-8')
 
     def get_info_ex(self, id: TUCAM_IDINFO):
+        """
+            Returns info on an open camera. This seems to be identical to get_info.
+
+            Parameters
+            ----------
+            id : TUCAM_IDINFO
+                The desired information identifier,
+
+            Returns
+            -------
+            str
+
+            Raises
+            ------
+            TUCamError
+                If the actual SDK function call does not return TUCAMRET_SUCCESS
+            """
         tvinfo = TUCAM_VALUE_INFO(id.value, 0, 0, 0)
         self.TUCAM_Dev_GetInfoEx(self.TUCAMOPEN.hIdxTUCam, pointer(tvinfo))
         return ctypes.string_at(tvinfo.pText).decode('utf-8')
 
     def get_capability_info(self, id: TUCAM_IDCAPA):
-        # returns information about the capability, meaning its minimum, maximum, default, step.
+        """
+            Returns capability  on an open camera.
+
+            Parameters
+            ----------
+            id : TUCAM_IDCAPA
+                The desired information identifier,
+
+            Returns
+            -------
+            tuple of min, max, default, step
+
+            Raises
+            ------
+            TUCamError
+                If the actual SDK function call does not return TUCAMRET_SUCCESS
+            ValueError
+                If the requested capability does not exists.
+            """
+        #returns information about the capability, meaning its minimum, maximum, default, step.
         if (id.value >= TUCAM_IDCAPA.TUIDC_ENDCAPABILITY.value):
             raise ValueError("No such capability")
         capainfo = TUCAM_CAPA_ATTR()
@@ -1251,7 +1304,28 @@ class TUCamDLL:
         return capainfo.nValMin, capainfo.nValMax, capainfo.nValDft, capainfo.nValStep
 
     def set_capability_value(self, cap: TUCAM_IDCAPA, val):
-        # set the requested capability (see TUCAM_IDCAPA)
+        """
+            Sets a capability on an open camera.
+            For a list of capabilities see the SDK,  TUCAM_IDCAPA enum
+
+            Parameters
+            ----------
+            cap : TUCAM_IDCAPA
+                The desired information identifier,
+            val : number
+                The value (float or int) to set the capability to.
+
+            Returns
+            -------
+            tuple of min, max, default, step
+
+            Raises
+            ------
+            TUCamError
+                If the actual SDK function call does not return TUCAMRET_SUCCESS
+            ValueError
+                If the requested capability does not exists, or it is out of range
+            """
         try:
             capa = TUCAM_CAPA_ATTR()
             capa.idCapa = cap.value
@@ -1260,12 +1334,34 @@ class TUCamDLL:
                 self.TUCAM_Capa_SetValue(self.TUCAMOPEN.hIdxTUCam, capa.idCapa, val)
             else:
                 # you asked for an out of range value
-                raise Exception("Capability value out of range")
+                raise ValueError("Capability value out of range")
         except Exception:
-            raise Exception("No such capability")
+            raise ValueError("No such capability")
 
     def get_property_info(self, id: TUCAM_IDPROP):
-        # return information about the property, meaning its minimum, maximum, default, step (all floats)
+        """
+            Requests property info on an open camera.
+            For a list of properties see the SDK,  TUCAM_IDCAPA enum
+            Do not use this directly, see the helper functions like _applyExposureTime
+
+            Parameters
+            ----------
+            cap : TUCAM_IDCAPA
+                The desired information identifier,
+            val : number
+                The value (float or int) to set the capability to.
+
+            Returns
+            -------
+            tuple of min, max, default, step values for that property
+
+            Raises
+            ------
+            TUCamError
+                If the actual SDK function call does not return TUCAMRET_SUCCESS
+            ValueError
+                If the requested capability does not exists.
+            """
         prop = TUCAM_PROP_ATTR()
         prop.idProp = id.value
         prop.nIdxChn = 0
@@ -1277,6 +1373,26 @@ class TUCamDLL:
         return prop.dbValMin, prop.dbValMax, prop.dbValDft, prop.dbValStep
 
     def get_property_value(self, id: TUCAM_IDPROP):
+        """
+            Requests the current value of a property, on an open camera.
+            For a list of properties see the SDK,  TUCAM_IDPROP enum
+
+            Parameters
+            ----------
+            id: TUCAM_IDPROP
+                The desired information identifier,
+
+            Returns
+            -------
+            The current value of the requested property
+
+            Raises
+            ------
+            TUCamError
+                If the actual SDK function call does not return TUCAMRET_SUCCESS
+            ValueError
+                If the requested capability does not exists (is not in range of TUCAM_IDPROP
+            """
         value = c_double(-1.0)
         try:
             self.TUCAM_Prop_GetValue(self.TUCAMOPEN.hIdxTUCam, id.value, pointer(value), 0)
@@ -1286,12 +1402,60 @@ class TUCamDLL:
         return value
 
     def set_property_value(self, id: TUCAM_IDPROP, val: float):
+        """
+             Sets the value of a property, on an open camera.
+             For a list of properties see the SDK,  TUCAM_IDPROP enum
+
+             Parameters
+             ----------
+             id: TUCAM_IDPROP
+                 The desired information identifier,
+             val: float
+                The vlaue to set.
+
+             Returns
+             -------
+             Nothing
+
+             Raises
+             ------
+             TUCamError
+                 If the actual SDK function call does not return TUCAMRET_SUCCESS.
+                 This would mean that the value is out of range, use get_property_info for the valid range.
+             ValueError
+                 If the requested capability does not exists (is not in range of TUCAM_IDPROP)
+             """
         try:
             self.TUCAM_Prop_SetValue(self.TUCAMOPEN.hIdxTUCam, id.value, c_double(val), 0)
         except Exception:
             raise ValueError("No such property")
 
     def get_resolution_info(self):
+        """
+             Queries the camera for available resolutions.
+             On the DHYANA camera, there is only one resolution available,
+             and we use ROI to reduce it.
+
+             Parameters
+             ----------
+             id: TUCAM_IDPROP
+                 The desired information identifier,
+             val: float
+                The vlaue to set.
+
+             Returns
+             -------
+             Nothing
+
+             Raises
+             ------
+             Exception
+                If the camera is not opened.
+             TUCamError
+                 If the actual SDK function call does not return TUCAMRET_SUCCESS.
+             ValueError
+                 If the requested capability does not exists (is not in range of TUCAM_IDPROP)
+             """
         if self.TUCAMOPEN.hIdxTUCam == 0:
             raise Exception("Camera not opened")
         valText = TUCAM_VALUE_TEXT()
@@ -1315,7 +1479,27 @@ class TUCamDLL:
         except Exception:
             raise Exception("Unable to get capability info")
 
-    def get_camera_info_astext(self, infoid):
+    def get_camera_info_astext(self, infoid: TUCAM_IDINFO):
+        """
+              Queries the camera for info, like name of type.
+              Do not use diretcly, see helper functions like getModelName
+
+              Parameters
+              ----------
+              infoid: TUCAM_IDINFO
+                The requested info, see TUCAM_IDONFO enum
+
+              Returns
+              -------
+              str
+
+              Raises
+              ------
+              Exception
+                 If the camera is not opened.
+              TUCamError
+                  If the actual SDK function call does not return TUCAMRET_SUCCESS.
+              """
         if self.TUCAMOPEN.hIdxTUCam == 0:
             raise Exception("Camera not opened")
 
@@ -1330,15 +1514,56 @@ class TUCamDLL:
         return ctypes.string_at(tvinfo.pText).decode('utf-8')
         # print('Camera Name:%#s' % TUCAMVALUEINFO.pText)
 
-    def openCamera(self, idx):
-        # FIXME: use serial number? or idx?
+    def openCamera(self, Idx):
+        """
+             This call opens a camera. If multiple cameras are present, set Idx to the desired index (>=0).
+             Only one camera can be open at any time, however the Idx parameter can be used to choose which one.
+
+             Parameters
+             ----------
+             Idx: integer
+               The index of the camera to open, use 0 if only one camera is connected.
+
+             Returns
+             -------
+             Nothing
+
+             Raises
+             ------
+             TUCamError
+                 If the actual SDK function call does not return TUCAMRET_SUCCESS.
+                 This means that a camera is not connected. be aware that it can take multiple seconds
+                 after switching a camera on before it is recognised.
+             """
         self.TUCAM_Dev_Open(pointer(self.TUCAMOPEN))
         if 0 == self.TUCAMOPEN.hIdxTUCam:
-            raise IOError("Open camera failed")
-
-        logging.debug("Open camera succeeded, idx=%d" % idx)
+            logging.debug("Open camera failed")
+            raise TUCamError(TUCAMRET_Enum.TUCAMRET_NO_CAMERA, "Open camera failed")
+        else:
+            logging.debug("Open camera succeeded, Idx=%d" % Idx)
 
     def closeCamera(self):
+        """
+            This call closes an open camera.
+            It also stops the acquisition thread, if running.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            Nothing
+
+            Raises
+            ------
+            TUCamError
+                If the actual SDK function call does not return TUCAMRET_SUCCESS.
+                This means that a camera is not connected. be aware that it can take multiple seconds
+                after switching a camera on before it is recognised.
+            """
+        self.stop_camera_feed()
+
         if 0 != self.TUCAMOPEN.hIdxTUCam:
             self.TUCAM_Dev_Close(self.TUCAMOPEN.hIdxTUCam)
         self.TUCAMOPEN.hIdxTUCam = 0
@@ -1376,7 +1601,28 @@ class TUCamDLL:
                                 self._exposureTime * 1000.0)  # hardware takes milliseconds
 
     def applyParameters(self, fromThread=False):
-        # camera should be open
+        """
+              This call applies the parameters that have been set (targetTemperature, resolution, binning, roi)
+              To the actual hardware, this function calls all above _applyxxxx functions in sequence.
+
+              Parameters
+              ----------
+              fromThread: bool
+                True if called from the acquisition thread, false otherwise.
+
+              Returns
+              -------
+              str
+
+              Raises
+              ------
+              Exception
+                 If the camera is not opened or one of the set parameters is out of range.
+              TUCamError
+                  If the actual SDK function call does not return TUCAMRET_SUCCESS.
+                  This means that a value is out of range, see info in the exception.
+              """
+        #camera should be open
 
         with self._lock:
             if self.TUCAMOPEN.hIdxTUCam is None:
@@ -1401,6 +1647,23 @@ class TUCamDLL:
     # 3. call EndCapture.
 
     def startCapture(self):
+        """
+            This call starts a capture on an open camera by calling the necessary SDK fucntions.
+            Do not use directly, it is part of the cpature thread.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            Nothing
+
+            Raises
+            ------
+            TUCamError
+                If the actual SDK function call does not return TUCAMRET_SUCCESS.
+            """
         self.m_frame = TUCAM_FRAME()
         self.m_format = TUIMG_FORMATS
         self.m_frformat = TUFRM_FORMATS
@@ -1415,7 +1678,23 @@ class TUCamDLL:
         self.TUCAM_Cap_Start(self.TUCAMOPEN.hIdxTUCam, self.m_capmode.TUCCM_SEQUENCE.value)
 
     def captureFrame(self, timeout: float) -> numpy.ndarray:
+        """
+            This call captures one frame by calling the necessary SDK fucntions.
+            Do not use directly, it is part of the cpature thread.
 
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            Nothing
+
+            Raises
+            ------
+            TUCamError
+                If the actual SDK function call does not return TUCAMRET_SUCCESS.
+            """
         try:
             self.TUCAM_Buf_WaitForFrame(self.TUCAMOPEN.hIdxTUCam, pointer(self.m_frame), int(timeout * 1000))
         except OSError as ex:
@@ -1441,12 +1720,32 @@ class TUCamDLL:
     #     self.TUCAM_File_SaveImage(self.TUCAMOPEN.hIdxTUCam, fs)
 
     def endCapture(self):
+        """
+            This call stops a capture on an open camera by calling the necessary SDK fucntions.
+            Do not use directly, it is part of the capture thread.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            Nothing
+
+            Raises
+            ------
+            TUCamError
+                If the actual SDK function call does not return TUCAMRET_SUCCESS.
+            """
         self.TUCAM_Buf_AbortWait(self.TUCAMOPEN.hIdxTUCam)
         self.TUCAM_Cap_Stop(self.TUCAMOPEN.hIdxTUCam)
         self.TUCAM_Buf_Release(self.TUCAMOPEN.hIdxTUCam)
 
     # camera properties
     def _get_max_resolution(self):
+        """
+            Helper function for setResolution
+            """
         if self._binning == (1, 1):
             return (2048, 2040)
         elif self._binning == (2, 2):
@@ -1474,7 +1773,29 @@ class TUCamDLL:
         return self._binning
 
     def setResolution(self, res):
-        # call with tuple xres, yres. Set binning first
+        """
+            The DHYANA camera supports only one resolution of 2048,2010.
+            We simulate different resolutions by taking a roi.
+
+            The user should set the binning first (1,2,4). From the binning,
+            a maximum resolution results, to which the requested resolution is clipped.
+            After that, if the resolution requested is less, we set a roi and apply that,
+
+            Parameters
+            ----------
+            Res: tuple[int,int]
+                call with x, y resolution to set.
+
+            Returns
+            -------
+            Actual resolution, might be different (clipped).
+
+            Raises
+            ------
+            TUCamError
+                If the actual SDK function call does not return TUCAMRET_SUCCESS.
+                See the exception for the actual cause.
+            """
         max_res = self._get_max_resolution()
         if res[0] > max_res[0]:
             res[0] = max_res[0]
@@ -1504,6 +1825,26 @@ class TUCamDLL:
         return self._roi[2], self._roi[3]
 
     def setFanSpeed(self, value):
+        """
+              Fan speed, from 0.0 to 1.0
+              0.0 is no fan (use water cooling, 1.0 is maximum.
+              The hardware supports 3 (no cooling) to 0 (max fan)
+
+              Parameters
+              ----------
+              value: float
+                  Call with 0.0 for no cooling up to 1.0 for max fan.
+
+              Returns
+              -------
+              Nothing
+
+              Raises
+              ------
+              TUCamError
+                  If the actual SDK function call does not return TUCAMRET_SUCCESS.
+                  See the exception for the actual cause.
+              """
         # input : 1.0 is max, 0.0 is stop
         # camera value:
         # 0: "High"
@@ -1520,40 +1861,195 @@ class TUCamDLL:
             raise Exception("invalid fan speed value")
 
     def getFanSpeed(self):
+        """
+             Returns the actual fan speed.
+
+             Parameters
+             ----------
+             None
+
+             Returns
+             -------
+             Actual fan speed, float
+
+             Raises
+             ------
+             TUCamError
+                 If the actual SDK function call does not return TUCAMRET_SUCCESS.
+                 See the exception for the actual cause.
+             """
         return (1.0 - self._fan_speed) / 3.0
 
-    def getTargetTemperature(self):
+    def getTargetTemperature(self) -> float:
+        """
+            Returns the set target temperature.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            set target temperature, float
+
+            Raises
+            ------
+            TUCamError
+                If the actual SDK function call does not return TUCAMRET_SUCCESS.
+                See the exception for the actual cause.
+            """
         return self._targetTemperature
         # TODO: read the actual target temperature accepted
 
-    def setTargetTemperature(self, value):
+    def setTargetTemperature(self, value: float):
+        """
+           Sets target temperature and applies it to hardware if possible.
+
+           Parameters
+           ----------
+           value: float
+                desired target temperature
+
+           Returns
+           -------
+           None
+
+           Raises
+           ------
+           TUCamError
+               If the actual SDK function call does not return TUCAMRET_SUCCESS.
+               See the exception for the actual cause.
+           """
         self._targetTemperature = float(value)
 
         self._parametersChanged = True
         self.applyParameters()
 
+    def getTargetTemperatureRange(self):
+        """
+           Returns info on the range of the target temperature
+
+           Parameters
+           ----------
+           None
+
+           Returns
+           -------
+           tuple of floats, min, max, default, step
+
+           Raises
+           ------
+           TUCamError
+               If the actual SDK function call does not return TUCAMRET_SUCCESS.
+               See the exception for the actual cause.
+           """
+        return self.get_property_info(TUCAM_IDPROP.TUIDP_TEMPERATURE)
+
     def setGain(self, value):
+        """
+            Set gain, camera cannot do this.
+            """
         self._gain = value
 
     def getGain(self):
+        """
+            Returns gain, camera cannot do this.
+            """
         return self._gain
 
     def getExposureTime(self):
+        """
+          Returns set exposure time,
+
+          Parameters
+          ----------
+          None
+
+          Returns
+          -------
+          current time, float
+
+          Raises
+          ------
+          TUCamError
+              If the actual SDK function call does not return TUCAMRET_SUCCESS.
+              See the exception for the actual cause.
+          """
         return self._exposureTime
 
     def setExposureTime(self, value):
+        """
+             Sets exposure time, applies it to hardware
+
+             Parameters
+             ----------
+             vlaue::float
+
+             Returns
+             -------
+             Nothing
+
+             Raises
+             ------
+             TUCamError
+                 If the actual SDK function call does not return TUCAMRET_SUCCESS.
+                 See the exception for the actual cause.
+             """
         self._exposureTime = value
 
         self._parametersChanged = True
         self.applyParameters()
 
+    def getExposureTimeRange(self):
+        """
+            Returns info on the range of the exposure time.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            tuple of floats, min, max, default, step
+
+            Raises
+            ------
+            TUCamError
+                If the actual SDK function call does not return TUCAMRET_SUCCESS.
+                See the exception for the actual cause.
+            """
+        return self.get_property_info(TUCAM_IDPROP.TUIDP_EXPOSURETM)
+
     def getTemperature(self):
+        """
+             Returns actual temperature
+
+             Parameters
+             ----------
+             None
+
+             Returns
+             -------
+             current temperature, float
+
+             Raises
+             ------
+             TUCamError
+                 If the actual SDK function call does not return TUCAMRET_SUCCESS.
+                 See the exception for the actual cause.
+             """
         return self.get_property_value(TUCAM_IDPROP.TUIDP_TEMPERATURE)
 
     def getModelName(self) -> str:
+        """
+            Returns type of camera
+            """
         return self.get_camera_info_astext(TUCAM_IDINFO.TUIDI_CAMERA_MODEL)
 
     def getSwVersion(self) -> str:
+        """
+            Returns API version on camera
+            """
         return self.get_camera_info_astext(TUCAM_IDINFO.TUIDI_VERSION_API)
 
 
@@ -1715,6 +2211,9 @@ class FakeTUCamDLL:
         self._parametersChanged = True
         self.applyParameters()
 
+    def getTargetTemperatureRange(self):
+        return (0.0, 1000.0, 400.0, 1.0)
+
     def setGain(self, value):
         self._gain = value
 
@@ -1729,6 +2228,10 @@ class FakeTUCamDLL:
 
         self._parametersChanged = True
         self.applyParameters()
+
+    def getExposureTimeRange(self):
+        # min, max, default, step.
+        return (0.011200000000000002, 17615.808, 10.0128, 0.011200000000000002)
 
     def getTemperature(self):
         return self._targetTemperature

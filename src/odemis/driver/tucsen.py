@@ -1206,7 +1206,11 @@ class TUCamDLL:
         self.TUCAMINIT = TUCAM_INIT(0, self.Path.encode('utf-8'))
         self.TUCAMOPEN = TUCAM_OPEN(0, 0)
 
-        self.TUCAM_Api_Init(pointer(self.TUCAMINIT), 5000)
+        try:
+            self.TUCAM_Api_Init(pointer(self.TUCAMINIT), 5000)
+        except Exception:
+            # TODO: if no camera is connected, this fails. => handle better
+            logging.exception("Failed to init")
         self._nrCameras = self.TUCAMINIT.uiCamCount
 
         self._lock = threading.Lock()
@@ -1372,7 +1376,7 @@ class TUCamDLL:
             raise ValueError("No such property")
         return prop.dbValMin, prop.dbValMax, prop.dbValDft, prop.dbValStep
 
-    def get_property_value(self, id: TUCAM_IDPROP):
+    def get_property_value(self, id: TUCAM_IDPROP) -> float:
         """
             Requests the current value of a property, on an open camera.
             For a list of properties see the SDK,  TUCAM_IDPROP enum
@@ -1393,13 +1397,13 @@ class TUCamDLL:
             ValueError
                 If the requested capability does not exists (is not in range of TUCAM_IDPROP
             """
-        value = c_double(-1.0)
+        cvalue = c_double(-1.0)
         try:
-            self.TUCAM_Prop_GetValue(self.TUCAMOPEN.hIdxTUCam, id.value, pointer(value), 0)
+            self.TUCAM_Prop_GetValue(self.TUCAMOPEN.hIdxTUCam, id.value, pointer(cvalue), 0)
             # print("PropID=", num, "The current value is=", value)
         except Exception:
             raise ValueError("No such property")
-        return value
+        return cvalue.value
 
     def set_property_value(self, id: TUCAM_IDPROP, val: float):
         """
@@ -1562,8 +1566,6 @@ class TUCamDLL:
                 This means that a camera is not connected. be aware that it can take multiple seconds
                 after switching a camera on before it is recognised.
             """
-        self.stop_camera_feed()
-
         if 0 != self.TUCAMOPEN.hIdxTUCam:
             self.TUCAM_Dev_Close(self.TUCAMOPEN.hIdxTUCam)
         self.TUCAMOPEN.hIdxTUCam = 0
@@ -1851,7 +1853,7 @@ class TUCamDLL:
         # 1: "Medium"
         # 2: "Low"
         # 3: "Off (Water Cooling)"
-        value = int((1.0 - value) * 3.0)
+        value = int((1.0 - value) * 3)
         if 0 <= value <= 3:
             self._fan_speed = value
 
@@ -1878,7 +1880,7 @@ class TUCamDLL:
                  If the actual SDK function call does not return TUCAMRET_SUCCESS.
                  See the exception for the actual cause.
              """
-        return (1.0 - self._fan_speed) / 3.0
+        return 1.0 - (self._fan_speed / 3)
 
     def getTargetTemperature(self) -> float:
         """
@@ -2000,7 +2002,7 @@ class TUCamDLL:
         self._parametersChanged = True
         self.applyParameters()
 
-    def getExposureTimeRange(self):
+    def getExposureTimeRange(self) -> float:
         """
             Returns info on the range of the exposure time.
 
@@ -2020,7 +2022,7 @@ class TUCamDLL:
             """
         return self.get_property_info(TUCAM_IDPROP.TUIDP_EXPOSURETM)
 
-    def getTemperature(self):
+    def getTemperature(self) -> float:
         """
              Returns actual temperature
 
@@ -2352,6 +2354,8 @@ class TUCam(model.DigitalCamera):
         self.temp_timer.start()
 
         trange = (-100, 0)  # °C,  TODO: fill in
+        rng = self._dll.getTargetTemperatureRange()
+        logging.debug(rng)
         # # Always support 25°C, to disable the cooling
         # trange = (trange[0], max(trange[1], 25))
         self.targetTemperature = model.FloatContinuous(trange[0], trange, unit="°C",
@@ -2407,7 +2411,7 @@ class TUCam(model.DigitalCamera):
         # it's read-only, so we change it only via _value
         self.temperature._value = temp
         self.temperature.notify(self.temperature.value)
-        logging.debug("Temperature of %s is %d°C", self.name, temp)
+        logging.debug("Temperature of %s is %f°C", self.name, temp)
 
     # Wrappers to the actual DLL functions
     def _open_camera(self, device: Optional[str]):
@@ -2583,7 +2587,7 @@ class TUCam(model.DigitalCamera):
                         logging.debug("Received image of %s after %s s", array.shape,
                                       time.time() - start_t)
                         da = model.DataArray(array, metadata)
-                        self.data.notify(da)
+                        self.data.notify(self._transposeDAToUser(da))
                         break
                     except TUCamError as ex:
                         # Timeout is expected for any exposure time >= 0.1s

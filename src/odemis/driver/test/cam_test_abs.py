@@ -151,8 +151,10 @@ class VirtualTestCam(metaclass=ABCMeta):
         orig_fs = self.camera.fanSpeed.value
         self.camera.fanSpeed.value = self.camera.fanSpeed.range[0]
         self.assertEqual(self.camera.fanSpeed.value, self.camera.fanSpeed.range[0])
+        time.sleep(0.1)
         self.camera.fanSpeed.value = self.camera.fanSpeed.range[1]
         self.assertEqual(self.camera.fanSpeed.value, self.camera.fanSpeed.range[1])
+        time.sleep(0.1)
         self.camera.fanSpeed.value = orig_fs
         self.assertEqual(self.camera.fanSpeed.value, orig_fs)
 

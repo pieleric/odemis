@@ -1473,7 +1473,7 @@ class TUCamDLL:
     def get_camera_info_astext(self, infoid: TUCAM_IDINFO) -> str:
         """
         Queries the camera for info, like name of type.
-        Do not use directly, see helper functions like getModelName
+        Do not use directly, see helper functions like get_model_name
 
         Parameters
         ----------
@@ -1500,24 +1500,6 @@ class TUCamDLL:
         #return tvinfo.pText.decode('utf8')
         return ctypes.string_at(tvinfo.pText).decode('utf-8')
         # print('Camera Name:%#s' % TUCAMVALUEINFO.pText)
-
-    def setGlobalGain(self, gain_idx: int) -> None:
-        """
-        Sets the global gain of the camera.
-        :param gain_idx:
-            The gain index, between 0 and 3:
-            0 = HDR (16 bits?!)
-            1: High gain (12 bits?)
-            2: Low gain (12 bits?)
-            3: HDR raw
-
-        Raises
-        ------
-        TUCamError
-            If the actual SDK function call does not return TUCAMRET_SUCCESS.
-            This would mean that the value is out of range, use get_property_info for the valid range.
-        """
-        self.set_property_value(TUCAM_IDPROP.TUIDP_GLOBALGAIN, gain_idx)
 
     def openCamera(self, idx):
         """
@@ -1571,8 +1553,6 @@ class TUCamDLL:
             self.TUCAM_Dev_Close(self.TUCAMOPEN.hIdxTUCam)
         self.TUCAMOPEN.hIdxTUCam = 0
 
-    # functions to apply parameters to the actual hardware:
-
     def get_max_resolution(self, res_idx: int) -> Tuple[Tuple[int, int], int]:
         """
             Helper function for setResolution
@@ -1584,7 +1564,7 @@ class TUCamDLL:
         elif res_idx == 3:
             return (512, 510), 3
         else:
-            raise ValueError("Invalid value for res_idx set")
+            raise ValueError(f"Invalid value for res_idx {res_idx}")
 
     def get_resolution_index(self, binning: Tuple[int, int]) -> int:
         """
@@ -1599,52 +1579,6 @@ class TUCamDLL:
             return 3
         else:
             raise ValueError(f"Invalid value for binning {binning}")
-
-    def set_resolution(self, res_idx: int) -> None:
-        """
-        :param res_idx: the selected resolution index (essentially affects the binning)
-        :return:
-        """
-        self.set_capability_value(TUCAM_IDCAPA.TUIDC_RESOLUTION, res_idx)
-
-    def set_roi(self, roi: Tuple[int, int, int, int], translation: Tuple[int, int]):
-        """
-        :param roi: left, top, width, height, in px (from 0) in the current resolution defined by
-        the "resolution index" (aka binning)
-        :param translation:
-        :return:
-        """
-        roi_parm = TUCAM_ROI_ATTR()
-        roi_parm.bEnable = 1
-        roi_parm.nHOffset = roi[0] + translation[0]
-        roi_parm.nVOffset = roi[1] + translation[1]
-        roi_parm.nWidth = roi[2]
-        roi_parm.nHeight = roi[3]
-
-        try:
-            self.TUCAM_Cap_SetROI(self.TUCAMOPEN.hIdxTUCam, roi_parm)
-            logging.debug('Set ROI state success, HOffset:%#d, VOffset:%#d, Width:%#d, Height:%#d',
-            roi_parm.nHOffset, roi_parm.nVOffset, roi_parm.nWidth, roi_parm.nHeight)
-        except Exception:
-            logging.exception('Set ROI state failure, HOffset:%#d, VOffset:%#d, Width:%#d, Height:%#d',
-            roi_parm.nHOffset, roi_parm.nVOffset, roi_parm.nWidth, roi_parm.nHeight)
-            raise
-
-    def set_fan_speed(self, fan_speed: int) -> None:
-        """
-        :param fan_speed:
-        0: "High"
-        1: "Medium"
-        2: "Low"
-        3: "Off (Water Cooling)"
-        """
-        self.set_capability_value(TUCAM_IDCAPA.TUIDC_FAN_GEAR, fan_speed)
-
-    def set_exposure_time(self, exp_time: float) -> None:
-        """
-        :param exp_time: in s
-        """
-        self.set_property_value(TUCAM_IDPROP.TUIDP_EXPOSURETM, exp_time * 1000.0)  # milliseconds
 
     # capturing data:
     # 1. call StartCapture
@@ -1670,7 +1604,6 @@ class TUCamDLL:
         self.m_frame.pBuffer = 0
         self.m_frame.ucFormatGet = self.m_frformat.TUFRM_FMT_USUAl.value
         self.m_frame.uiRsdSize = 1
-        # self.m_frameidx = 0  # keep counting frames
 
         self.TUCAM_Buf_Alloc(self.TUCAMOPEN.hIdxTUCam, pointer(self.m_frame))
         self.TUCAM_Cap_Start(self.TUCAMOPEN.hIdxTUCam, self.m_capmode.TUCCM_SEQUENCE.value)
@@ -1722,6 +1655,48 @@ class TUCamDLL:
         self.TUCAM_Cap_Stop(self.TUCAMOPEN.hIdxTUCam)
         self.TUCAM_Buf_Release(self.TUCAMOPEN.hIdxTUCam)
 
+    # functions to apply parameters to the actual hardware:
+    def set_resolution(self, res_idx: int) -> None:
+        """
+        :param res_idx: the selected resolution index (essentially affects the binning)
+        :return:
+        """
+        self.set_capability_value(TUCAM_IDCAPA.TUIDC_RESOLUTION, res_idx)
+
+    def set_roi(self, roi: Tuple[int, int, int, int], translation: Tuple[int, int]):
+        """
+        :param roi: left, top, width, height, in px (from 0) in the current resolution defined by
+        the "resolution index" (aka binning)
+        :param translation:
+        :return:
+        """
+        roi_parm = TUCAM_ROI_ATTR()
+        roi_parm.bEnable = 1
+        roi_parm.nHOffset = roi[0] + translation[0]
+        roi_parm.nVOffset = roi[1] + translation[1]
+        roi_parm.nWidth = roi[2]
+        roi_parm.nHeight = roi[3]
+
+        try:
+            self.TUCAM_Cap_SetROI(self.TUCAMOPEN.hIdxTUCam, roi_parm)
+            logging.debug('Set ROI state success, HOffset:%#d, VOffset:%#d, Width:%#d, Height:%#d',
+                          roi_parm.nHOffset, roi_parm.nVOffset, roi_parm.nWidth, roi_parm.nHeight)
+        except Exception:
+            logging.exception(
+                'Set ROI state failure, HOffset:%#d, VOffset:%#d, Width:%#d, Height:%#d',
+                roi_parm.nHOffset, roi_parm.nVOffset, roi_parm.nWidth, roi_parm.nHeight)
+            raise
+
+    def set_fan_speed(self, fan_speed: int) -> None:
+        """
+        :param fan_speed:
+        0: "High"
+        1: "Medium"
+        2: "Low"
+        3: "Off (Water Cooling)"
+        """
+        self.set_capability_value(TUCAM_IDCAPA.TUIDC_FAN_GEAR, fan_speed)
+
     def set_target_temperature(self, temp: float) -> None:
         """
         :param temp: in °C
@@ -1756,6 +1731,23 @@ class TUCamDLL:
         def target_to_c(targt):
             return targt / 10 - 50
         return target_to_c(mn), target_to_c(mx), target_to_c(dft), step / 10
+
+    def get_temperature(self) -> float:
+        """
+        Returns actual temperature
+
+        Returns
+        -------
+        current temperature, float  °C
+
+        Raises
+        ------
+        TUCamError
+            If the actual SDK function call does not return TUCAMRET_SUCCESS.
+            See the exception for the actual cause.
+        """
+        # When reading, it's directly in °C
+        return self.get_property_value(TUCAM_IDPROP.TUIDP_TEMPERATURE)
 
     def get_exposure_time_range(self) -> Tuple[float, float, float, float]:
         """
@@ -1796,22 +1788,29 @@ class TUCamDLL:
         """
         return self.get_property_value(TUCAM_IDPROP.TUIDP_EXPOSURETM) / 1000
 
-    def get_temperature(self) -> float:
+    def set_exposure_time(self, exp_time: float) -> None:
         """
-        Returns actual temperature
+        :param exp_time: in s
+        """
+        self.set_property_value(TUCAM_IDPROP.TUIDP_EXPOSURETM, exp_time * 1000.0)  # milliseconds
 
-        Returns
-        -------
-        current temperature, float  °C
+    def set_global_gain(self, gain_idx: int) -> None:
+        """
+        Sets the global gain of the camera.
+        :param gain_idx:
+            The gain index, between 0 and 3:
+            0 = HDR (16 bits?!)
+            1: High gain (12 bits?)
+            2: Low gain (12 bits?)
+            3: HDR raw
 
         Raises
         ------
         TUCamError
             If the actual SDK function call does not return TUCAMRET_SUCCESS.
-            See the exception for the actual cause.
+            This would mean that the value is out of range, use get_property_info for the valid range.
         """
-        # When reading, it's directly in °C
-        return self.get_property_value(TUCAM_IDPROP.TUIDP_TEMPERATURE)
+        self.set_property_value(TUCAM_IDPROP.TUIDP_GLOBALGAIN, gain_idx)
 
     def get_black_level(self) -> int:
         """
@@ -1833,7 +1832,7 @@ class TUCamDLL:
         """
         return self.get_camera_info_astext(TUCAM_IDINFO.TUIDI_VERSION_API)
 
-    def getSerialNumber(self) -> str:
+    def get_serial_number(self) -> str:
         cSN = (c_char * 64)()
         pSN = cast(cSN, c_char_p)
         TUCAMREGRW = TUCAM_REG_RW(1, pSN, 64)
@@ -1848,23 +1847,18 @@ class FakeTUCamDLL:
     """
     def __init__(self):
         # camera parameters
-        self._resolution = 0  # 0 = 2048,2040 1 = 2048,2040 HDR  2= 1024, 1020 2x2  3 = 512, 510 4x4
-        self._binning = (1, 1)
-        self._translation = (0, 0)
-        self._gain = 1.0
+        self._res_id = 0  # 0 = 2048,2040 1 = 2048,2040 HDR  2= 1024, 1020 2x2  3 = 512, 510 4x4
         self._roi = (0, 0, 2048, 2010)
-        self._targetTemperature = -20.0
+        self._target_temperature = -20.0
         self._fan_speed = 0  # 0 = max, 3 = off (water cooling)
-        self._exposureTime = 1.0
-        self._parametersChanged = True
-        self._frameIdx = 0
-        self._nrCameras = 1     # fake one camera.
+        self._exposure_time = 1.0
+        self._gain = 0
 
     def TUCAM_Api_Uninit(self):
         pass
 
     def openCamera(self, idx):
-        if idx >= self._nrCameras:
+        if idx >= 1:
             logging.debug("Open camera %s failed", idx)
             raise model.HwError("No Tucsen camera found, check the camera is turned on")
 
@@ -1881,16 +1875,16 @@ class FakeTUCamDLL:
 
     def captureFrame(self, timeout: float) -> numpy.ndarray:
 
-        # wait for camera exposure time, then produce a random noise image
-        time.sleep(self._exposureTime)
+        # TODO: raise an exception on timeout if shorter than exposure time
 
-        self._frameIdx += 1
+        # wait for camera exposure time, then produce a random noise image
+        time.sleep(self._exposure_time)
 
         # Create an empty NumPy array of the same length and dtype
-        arr = numpy.empty((self._roi[2], self._roi[3]), dtype=numpy.uint16)
+        arr = numpy.empty((self._roi[3], self._roi[2]), dtype=numpy.uint16)
 
         # Basic: just a gradient
-        arr[:] = numpy.linspace(100, 2 ** 16 - 300, self._roi[3])
+        arr[:] = numpy.linspace(100, 2 ** 16 - 300, arr.shape[1])
 
         # Add some noise
         arr += numpy.random.randint(0, 200, arr.shape, dtype=arr.dtype)
@@ -1898,118 +1892,84 @@ class FakeTUCamDLL:
         return arr
 
     # camera properties
-    def _get_max_resolution(self):
-        if self._binning == (1, 1):
-            return (2048, 2040)
-        elif self._binning == (2, 2):
-            return (1024, 1020)
-        elif self._binning == (4, 4):
-            return (512, 510)
+    def get_max_resolution(self, res_idx: int) -> Tuple[Tuple[int, int], int]:
+        """
+            Helper function for setResolution
+            """
+        if res_idx in (0, 1):
+            return (2048, 2040), 1
+        elif res_idx == 2:
+            return (1024, 1020), 2
+        elif res_idx == 3:
+            return (512, 510), 3
         else:
-            raise Exception("Invalid value for binning set")
+            raise ValueError("Invalid value for res_idx set")
 
-    # property setters
-
-    def setBinning(self, value):
-        if self._binning == (1, 1):
-            self._resolution = 1
-        elif self._binning == (2, 2):
-            self._resolution = 2
-        elif self._binning == (4, 4):
-            self._resolution = 3
+    def get_resolution_index(self, binning: Tuple[int, int]) -> int:
+        """
+        Converts a binning tuple into a resolution index.
+        :return: The resolution index as expected by _applyResolution()
+        """
+        if binning == (1, 1):
+            return 0
+        elif binning == (2, 2):
+            return 2
+        elif binning == (4, 4):
+            return 3
         else:
-            raise Exception("Invalid value for binning set")
+            raise ValueError(f"Invalid value for binning {binning}")
 
-        self._parametersChanged = True
-        self.applyParameters()
+    def set_roi(self, roi: Tuple[int, int, int, int], translation: Tuple[int, int]):
+        self._roi = (roi[0] + translation[0],
+                     roi[1] + translation[1],
+                     roi[2],
+                     roi[3])
 
-    def getBinning(self):
-        return self._binning
+    def set_resolution(self, res_idx: int) -> None:
+        assert 0 <= res_idx <= 3
+        self._res_id = res_idx
 
-    def setResolution(self, res):
-        # call with tuple xres, yres. Set binning first
-        max_res = self._get_max_resolution()
-        if res[0] > max_res[0]:
-            res[0] = max_res[0]
-        if res[1] > max_res[1]:
-            res[1] = max_res[1]
-
-        self._roi = (int(max_res[0] / 2) - int(res[0] / 2),  # left
-                     int(max_res[1] / 2) - int(res[1] / 2),  # top
-                     res[0],  # width
-                     res[1])  # height
-
-        # clip translation. not allowed to walk outside camera ROI.
-
-        clipped_translation_x = self._translation[0]
-        if self._roi[0] + self._roi[2] + clipped_translation_x > max_res[0]:
-            clipped_translation_x = max_res[0] - self._roi[0] - self._roi[2]
-        clipped_translation_y = self._translation[1]
-        if self._roi[1] + self._roi[3] + clipped_translation_y > max_res[1]:
-            clipped_translation_y = max_res[0] - self._roi[0] - self._roi[2]
-        self._translation = (clipped_translation_x, clipped_translation_y)
-
-        self._parametersChanged = True
-        self.applyParameters()
-
-        return res
-
-    def setFanSpeed(self, value):
-        # input : 1.0 is max, 0.0 is stop
-        # camera value:
-        # 0: "High"
-        # 1: "Medium"
-        # 2: "Low"
-        # 3: "Off (Water Cooling)"
-        value = int((1.0 - value) * 3.0)
+    def set_fan_speed(self, value):
         if 0 <= value <= 3:
             self._fan_speed = value
-
-            self._parametersChanged = True
-            self.applyParameters()
         else:
-            raise Exception("invalid fan speed value")
+            raise ValueError("invalid fan speed value")
 
-    def getFanSpeed(self):
-        return (1.0 - self._fan_speed) / 3.0
+    def set_target_temperature(self, value):
+        self._target_temperature = value
 
-    def getTemperature(self):
-        return self._targetTemperature
+    def get_target_temperature_range(self):
+        return (-50.0, 50.0, -10.0, 0.1)  # °C
 
-    def setTargetTemperature(self, value):
-        self._targetTemperature = value
-
-        self._parametersChanged = True
-        self.applyParameters()
-
-    def getTargetTemperatureRange(self):
-        return (0.0, 1000.0, 400.0, 1.0) # FIXME
-
-    def getExposureTime(self):
+    def get_exposure_time(self):
         # the fake dll returns the set exposure time, the real one reads
         # it from the hardware
-        return self._exposureTime
+        return self._exposure_time
 
-    def setExposureTime(self, value):
-        self._exposureTime = value
+    def set_exposure_time(self, value):
+        self._exposure_time = value
 
-        self._parametersChanged = True
-        self.applyParameters()
+    def get_exposure_time_range(self):
+        # min, max, default, step
+        return (0.0112e-3, 17.615, 10e-3, 0.0112e-3)
 
-    def getExposureTimeRange(self):
-        # min, max, default, step.
-        return (0.011200000000000002, 17615.808, 10.0128, 0.011200000000000002)
+    def get_temperature(self):
+        return self._target_temperature
 
-    def getTemperature(self):
-        return self._targetTemperature
+    def set_global_gain(self, gain_idx: int) -> None:
+        assert 0 <= gain_idx <= 3
+        self._gain = gain_idx
 
-    def getModelName(self):
+    def get_black_level(self) -> int:
+        return 100
+
+    def get_model_name(self):
         return "Dhyana 400BSI V3"
 
-    def getSwVersion(self):
+    def get_sw_version(self):
         return "1.0.0.fake"
 
-    def getSerialNumber(self) -> str:
+    def get_serial_number(self) -> str:
         return "FAKE123456"
 
 
@@ -2070,7 +2030,7 @@ class TUCam(model.DigitalCamera):
 
         # drivers/hardware info
         hw_name = self._dll.get_model_name()
-        sn = self._dll.getSerialNumber()
+        sn = self._dll.get_serial_number()
         if not "Dhyana 400BSI" in hw_name:
             logging.warning("Camera model %s not tested with Odemis, proceed with caution", hw_name)
         self._hwVersion = f"{hw_name} (S/N {sn})"
@@ -2094,7 +2054,7 @@ class TUCam(model.DigitalCamera):
         # Max resolution depends on the binning, so to know the max resolution, need to set binning to 1x1
         max_res, _ = self._dll.get_max_resolution(0)
         self._metadata[model.MD_SENSOR_SIZE] = self._transposeSizeToUser(max_res)
-        self._dll.setGlobalGain(0)  # HDR mode, 16 bits
+        self._dll.set_global_gain(0)  # HDR mode, 16 bits
         # Note: the "IMGMODESELECT" property also affects the bit depth. By default, it is set to 2
         # (HDR), which is what we want (16 bits).
         self._metadata[model.MD_BPP] = 16
@@ -2562,7 +2522,6 @@ class TUCam(model.DigitalCamera):
             if msg == GEN_TERM:
                 raise TerminationRequested()
             elif msg == GEN_SETTINGS:
-                logging.debug("Updating settings while acquisition is stopped")
                 self._update_settings(acquiring=False)
                 self._need_settings_update = False
                 continue  # wait for more message

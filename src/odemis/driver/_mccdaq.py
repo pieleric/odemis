@@ -99,7 +99,7 @@ class mccUSB:
                 if serial == None:
                     return device.open()
                 else:
-                    if device.getSerialNumber() == serial:
+                    if device.get_serial_number() == serial:
                         return device.open()
         return None
 
@@ -107,7 +107,7 @@ class mccUSB:
         with usb1.USBContext() as context:
             for device in context.getDeviceIterator(skip_on_error=True):
                 if device.getVendorID() == 0x9db and device.getProductID() == self.productID:
-                    return(device.getSerialNumber())
+                    return(device.get_serial_number())
 
     def getProduct(self):
         with usb1.USBContext() as context:

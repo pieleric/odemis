@@ -38,7 +38,7 @@ import odemis.gui.comp.canvas as canvas
 import odemis.gui.comp.miccanvas as miccanvas
 import odemis.gui.model as guimodel
 import odemis.gui.test as test
-from odemis import model
+from odemis import model, util
 from odemis.acq.move import FM_IMAGING, MicroscopePostureManager
 from odemis.acq.stream import UNDEFINED_ROI
 from odemis.driver import simsem
@@ -67,7 +67,7 @@ from odemis.gui.model import (TOOL_LABEL, TOOL_LINE, TOOL_POINT, TOOL_RULER,
                               FeatureOverviewView)
 from odemis.gui.util.img import wxImage2NDImage
 from odemis.model import getMicroscope
-from odemis.util import mock
+from odemis.util import mock, testing
 from odemis.util.comp import compute_scanner_fov, get_fov_rect
 from odemis.util.conversion import hex_to_frgb
 from odemis.util.testing import (assert_array_not_equal,
@@ -687,12 +687,13 @@ class OverlayTestCase(test.GuiTestCase):
 
         test.gui_loop()
         wroi = [-0.1, 0.3, 0.2, 0.4]  # in m
-        rsol.set_physical_sel(wroi)
+        corners = util.rotate_rect(wroi, 0)
+        rsol.set_physical_sel(corners)
         test.gui_loop()
-        wroi_back = rsol.get_physical_sel()
+        corners_back = rsol.get_physical_sel()
 
-        for o, b in zip(wroi, wroi_back):
-            self.assertAlmostEqual(o, b, msg="wroi (%s) != bak (%s)" % (wroi, wroi_back))
+        for o, b in zip(corners, corners_back):
+            testing.assert_tuple_almost_equal(o, b)
 
         rsol.repetition = (3, 2)
         rsol.fill = RepetitionSelectOverlay.FILL_POINT
@@ -704,7 +705,8 @@ class OverlayTestCase(test.GuiTestCase):
         # cnvs.update_drawing()
         test.gui_loop(2)
 
-        rsol.set_physical_sel((-0.1, -0.3, 0.4, 0.4))
+        corners = util.rotate_rect((-0.1, -0.3, 0.4, 0.4), 0)
+        rsol.set_physical_sel(corners)
         rsol.repetition = (50, 80)
         rsol.fill = RepetitionSelectOverlay.FILL_GRID
 

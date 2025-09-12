@@ -1131,6 +1131,7 @@ class RectangleEditingMixin(DragMixin):
 
     hover_margin = 10  # px
 
+    # TODO: drop center from here and from RectangleOverlay: not used anywhere, and normally automatically computed
     def __init__(self, colour=gui.SELECTION_COLOUR, center=(0, 0)):
 
         DragMixin.__init__(self)
@@ -1160,7 +1161,7 @@ class RectangleEditingMixin(DragMixin):
         self.colour = conversion.hex_to_frgba(colour)
         self.highlight = conversion.hex_to_frgba(gui.FG_COLOUR_HIGHLIGHT)
         self.v_center = Vec(center)
-        self.rotation = 0  # radians
+        self.rotation = 0.0  # radians
         # The rotation point in view coordinates
         # Hovering over this point's bounding box will result in the hover selection
         # as gui.HOVER_ROTATION. This will enable start_rotation and update_rotation methods
@@ -1288,6 +1289,10 @@ class RectangleEditingMixin(DragMixin):
     # #### drag methods  #####
 
     def start_rotation(self):
+        """
+        Start editing the rotation of the rectangle.
+        Called when the user presses the mouse button down while hovering over the rotation point.
+        """
         self._calc_center()
         dx = self.v_center.x - self.drag_v_start_pos.x
         dy = self.v_center.y - self.drag_v_start_pos.y
@@ -1295,6 +1300,9 @@ class RectangleEditingMixin(DragMixin):
         self.selection_mode = SEL_MODE_ROTATION
 
     def update_rotation(self):
+        """
+        Recomputes the rotation angle (.rotation) after the rectangle points have moved
+        """
         current_pos = Vec(self.cnvs.clip_to_viewport(self.drag_v_end_pos))
         dx = self.v_center.x - current_pos.x
         dy = self.v_center.y - current_pos.y

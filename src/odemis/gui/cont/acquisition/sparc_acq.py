@@ -138,7 +138,7 @@ class SparcAcquiController(object):
         # TODO: we need to be informed if the user closes suddenly the window
         # self.Bind(wx.EVT_CLOSE, self.on_close)
 
-        self._roa = tab_data.semStream.roi
+        self._roa = tab_data.roa
 
         # Listen to change of streams to update the acquisition time
         self._prev_streams = set()  # set of streams already listened to
@@ -155,6 +155,10 @@ class SparcAcquiController(object):
         tab_data.driftCorrector.dwellTime.subscribe(self._onAnyVA)
 
         self._roa.subscribe(self._onROA, init=True)
+        if tab_data.roa_rotation is not None:
+            # Rotation doesn't change the acquisition time, but might cause the RoA to be outside the FoV,
+            # in which case the acquisition should be disabled.
+            tab_data.roa_rotation.subscribe(self._onROA)
 
         # Listen to preparation state
         self._main_data_model.is_preparing.subscribe(self.on_preparation)
@@ -310,6 +314,16 @@ class SparcAcquiController(object):
             txt = "Region of acquisition needs to be selected"
             lvl = logging.WARN
         else:
+            if self._tab_data_model.roa_rotation:
+                # FIXME: check that the RoA is inside the FoV
+                # If not, show a warning and disable acquisition
+                # rot_roa = rotate_rect(self._roa.value, self._tab_data_model.roa_rotation.value)
+                # If any point < 0 or > 1 => out of bounds
+                # txt = "Region of acquisition out of bound due to rotation"
+                # lvl = logging.WARN
+                pass
+
+
             streams = self._tab_data_model.acquisitionStreams
 
             has_folds = len(streams) > len(acqmng.foldStreams(streams))

@@ -958,13 +958,12 @@ class StreamBarController(object):
         self._tab_data_model.roa.subscribe(self._onROA)
 
         if self._tab_data_model.roa_rotation:
-            stream.roi_rotation.value = self._tab_data_model.roa_rotation.value
-            self._tab_data_model.roa_rotation.subscribe()
+            stream.rotation.value = self._tab_data_model.roa_rotation.value
+            self._tab_data_model.roa_rotation.subscribe(self._on_roa_rotation)
 
         listener = functools.partial(self._onStreamROI, stream)
         stream.roi.subscribe(listener)
         self._roi_listeners[stream] = listener
-
 
     def _disconnectROI(self, stream):
         """

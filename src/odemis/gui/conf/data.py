@@ -1082,6 +1082,8 @@ STREAM_SETTINGS_CONFIG = {
             ("filter", {  # from filter
                 "choices": util.format_band_choices,
             }),
+            ("frameOverhead", {
+            }),
         )),
     stream.AngularSpectrumSettingsStream:
         OrderedDict((

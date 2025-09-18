@@ -24,6 +24,7 @@ This file is part of Odemis.
 
 import logging
 import math
+import time
 from typing import List, Optional, Tuple
 
 import cairo
@@ -445,7 +446,9 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
         self.p_point4 = None
         self.dashed = False  # FIXME: needed? We probably can hardcode it for now
 
-
+        # Changes what to draw, depending on the state
+        self._should_draw_edges = False
+        self._should_draw_labels = False
 
         self._bmp = None  # used to cache repetition with FILL_POINT
         # ROI for which the bmp is valid
@@ -699,34 +702,11 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
 
         self.cnvs.update_drawing()
 
-    def _draw_points(self, ctx):
-        # TODO: take rotation into account
-        # TODO: use p_points
-
-        # Calculate the offset of the center of the buffer relative to the
-        # top left of the buffer
-        offset = self.cnvs.get_half_buffer_size()
-
-        # The start and end position, in buffer coordinates. The return
-        # values may extend beyond the actual buffer when zoomed in.
-        b_pos = (self.cnvs.phys_to_buffer(self.p_start_pos, offset) +
-                 self.cnvs.phys_to_buffer(self.p_end_pos, offset))
-        b_pos = self._normalize_rect(b_pos)
-        # logging.debug("start and end buffer pos: %s", b_pos)
-
+    def _draw_points(self, ctx, b_points: List[Vec]):
         # Calculate the width and height in buffer pixels. Again, this may
         # be wider and higher than the actual buffer.
-        width = b_pos[2] - b_pos[0]
-        height = b_pos[3] - b_pos[1]
-
-        # logging.debug("width and height: %s %s", width, height)
-
-        # Clip the start and end positions using the actual buffer size
-        start_x, start_y = self.cnvs.clip_to_buffer(b_pos[:2])
-        end_x, end_y = self.cnvs.clip_to_buffer(b_pos[2:4])
-
-        # logging.debug(
-        #     "clipped start and end: %s", (start_x, start_y, end_x, end_y))
+        width = math.dist(b_points[0], b_points[1])
+        height = math.dist(b_points[1], b_points[2])
 
         rep_x, rep_y = self.repetition
 
@@ -734,18 +714,62 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
         step_x = width / rep_x
         step_y = height / rep_y
 
-        if width // 3 < rep_x or height // 3 < rep_y:
-            # If we cannot fit enough 3 bitmaps into either direction,
+        if False :# step_x < 3 or step_y < 3:  #DEBUG
+            # If we cannot fit 3x3 px bitmaps into either direction,
             # then we just fill a semi transparent rectangle
-            logging.debug("simple fill")
             r, g, b, _ = self.colour
             ctx.set_source_rgba(r, g, b, 0.5)
-            ctx.rectangle(
-                start_x, start_y,
-                int(end_x - start_x), int(end_y - start_y))
+            # Generic code to draw a polygon... though normally b_points should be 4 points
+            ctx.move_to(*b_points[0])
+            for p in b_points[1:]:
+                ctx.line_to(*p)
+            ctx.close_path()
             ctx.fill()
-            ctx.stroke()
         else:
+            r, g, b, _ = self.colour
+            ctx.set_source_rgba(r, g, b, 0.9)
+            ctx.set_line_width(1)
+            # ctx.set_antialias(cairo.ANTIALIAS_DEFAULT)
+            #ctx.set_antialias(cairo.ANTIALIAS_NONE)
+
+            logging.debug("Drawing %sx%s points", rep_x, rep_y)
+
+            # TODO: optimise, as it's gets slow when a lot of points are there (eg 100x100)
+            # The maths takes ~0.5s for 300x200 points => use numpy?
+            # Cairo drawing takes ~0.2s for 300x200 points
+
+            # Compute point position as by interpolating vertically between vertex 0 -> 1,
+            # and horizontally between vertex 0 -> 3.
+            hor_shift = b_points[1] - b_points[0]
+
+            t_start = time.time()
+            for i in range(0, rep_x):
+                hor_vec = b_points[0] + hor_shift * ((i + 0.5) / rep_x)
+                vert_shift = b_points[3] - b_points[0]
+                for j in range(0, rep_y):
+                    p_center = hor_vec + vert_shift * ((j + 0.5) / rep_y)
+
+                    # Draw a "circle" as 4 lines
+                    p_c0 = p_center + Vec(-1.5, 0)
+                    p_c1 = p_center + Vec(0, -1.5)
+                    p_c2 = p_center + Vec(1.5, 0)
+                    p_c3 = p_center + Vec(0, 1.5)
+
+                    # ctx.rectangle(p_c0[0], p_c0[1], 1, 1)  # TODO: Is that faster? (1 C call instead of 5 should be) apply a rotation?
+                    # Using arc() is much slower, so not an option
+                    ctx.move_to(*p_c0)
+                    ctx.line_to(*p_c1)
+                    ctx.line_to(*p_c2)
+                    ctx.line_to(*p_c3)
+                    ctx.close_path()
+
+            logging.debug("Point tracing took %.3f s", time.time() - t_start)
+
+            t_start = time.time()
+            ctx.stroke()
+            logging.debug("Cairo drawing took %.3f s", time.time() - t_start)
+
+
             # This cairo-way would work, but it's a little slow
             #             r, g, b, _ = self.colour
             #             ctx.set_source_rgba(r, g, b, 0.9)
@@ -765,82 +789,61 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
             #                             2, 0, 2 * math.pi)
             #                     ctx.stroke()
 
-            # check whether the cache is still valid
-            cl_pos = (start_x, start_y, end_x, end_y)
-            if not self._bmp or self._bmp_bpos != cl_pos:
-                # Cache the image as it's quite a lot of computations
-                half_step_x = step_x / 2
-                half_step_y = step_y / 2
+            # # check whether the cache is still valid
+            # cl_pos = (start_x, start_y, end_x, end_y)
+            # if not self._bmp or self._bmp_bpos != cl_pos:
+            #     # Cache the image as it's quite a lot of computations
+            #     half_step_x = step_x / 2
+            #     half_step_y = step_y / 2
+            #
+            #     # The number of repetitions that fits into the buffer
+            #     # clipped selection
+            #     buf_rep_x = int((end_x - start_x) / step_x)
+            #     buf_rep_y = int((end_y - start_y) / step_y)
+            #
+            #     logging.debug("Rendering %sx%s points", buf_rep_x, buf_rep_y)
+            #
+            #     point = guiimg.getBitmap("dot.png")
+            #     point_dc = wx.MemoryDC()
+            #     point_dc.SelectObject(point)
+            #     point.SetMaskColour(wx.BLACK)
+            #
+            #     horz_dc = wx.MemoryDC()
+            #     horz_bmp = wx.Bitmap(int(end_x - start_x), 3)
+            #     horz_dc.SelectObject(horz_bmp)
+            #     horz_dc.SetBackground(wx.BLACK_BRUSH)
+            #     horz_dc.Clear()
+            #
+            #     blit = horz_dc.Blit
+            #     for i in range(buf_rep_x):
+            #         x = int(i * step_x + half_step_x)
+            #         blit(x, 0, 3, 3, point_dc, 0, 0)
+            #
+            #     total_dc = wx.MemoryDC()
+            #     self._bmp = wx.Bitmap(int(end_x - start_x), int(end_y - start_y))
+            #     total_dc.SelectObject(self._bmp)
+            #     total_dc.SetBackground(wx.BLACK_BRUSH)
+            #     total_dc.Clear()
+            #
+            #     blit = total_dc.Blit
+            #     for j in range(buf_rep_y):
+            #         y = int(j * step_y + half_step_y)
+            #         blit(0, y, int(end_x - start_x), 3, horz_dc, 0, 0)
+            #
+            #     self._bmp.SetMaskColour(wx.BLACK)
+            #     self._bmp_bpos = cl_pos
+            #
+            # self.cnvs.dc_buffer.DrawBitmap(self._bmp,
+            #     int(start_x + (b_pos[0] - start_x) % step_x),
+            #     int(start_y + (b_pos[1] - start_y) % step_y),
+            #     useMask=True
+            # )
 
-                # The number of repetitions that fits into the buffer
-                # clipped selection
-                buf_rep_x = int((end_x - start_x) / step_x)
-                buf_rep_y = int((end_y - start_y) / step_y)
-
-                logging.debug("Rendering %sx%s points", buf_rep_x, buf_rep_y)
-
-                point = guiimg.getBitmap("dot.png")
-                point_dc = wx.MemoryDC()
-                point_dc.SelectObject(point)
-                point.SetMaskColour(wx.BLACK)
-
-                horz_dc = wx.MemoryDC()
-                horz_bmp = wx.Bitmap(int(end_x - start_x), 3)
-                horz_dc.SelectObject(horz_bmp)
-                horz_dc.SetBackground(wx.BLACK_BRUSH)
-                horz_dc.Clear()
-
-                blit = horz_dc.Blit
-                for i in range(buf_rep_x):
-                    x = int(i * step_x + half_step_x)
-                    blit(x, 0, 3, 3, point_dc, 0, 0)
-
-                total_dc = wx.MemoryDC()
-                self._bmp = wx.Bitmap(int(end_x - start_x), int(end_y - start_y))
-                total_dc.SelectObject(self._bmp)
-                total_dc.SetBackground(wx.BLACK_BRUSH)
-                total_dc.Clear()
-
-                blit = total_dc.Blit
-                for j in range(buf_rep_y):
-                    y = int(j * step_y + half_step_y)
-                    blit(0, y, int(end_x - start_x), 3, horz_dc, 0, 0)
-
-                self._bmp.SetMaskColour(wx.BLACK)
-                self._bmp_bpos = cl_pos
-
-            self.cnvs.dc_buffer.DrawBitmap(self._bmp,
-                int(start_x + (b_pos[0] - start_x) % step_x),
-                int(start_y + (b_pos[1] - start_y) % step_y),
-                useMask=True
-            )
-
-    def _draw_grid(self, ctx):
-        # TODO: take rotation into account
-
-        # Calculate the offset of the center of the buffer relative to the
-        # top left op the buffer
-        offset = self.cnvs.get_half_buffer_size()
-
-        # The start and end position, in buffer coordinates. The return
-        # values may extend beyond the actual buffer when zoomed in.
-        b_pos = (self.cnvs.phys_to_buffer(self.p_start_pos, offset) +
-                 self.cnvs.phys_to_buffer(self.p_end_pos, offset))
-        b_pos = self._normalize_rect(b_pos)
-        # logging.debug("start and end buffer pos: %s", b_pos)
-
-        # Calculate the width and height in buffer pixels. Again, this may
-        # be wider and higher than the actual buffer.
-        width = b_pos[2] - b_pos[0]
-        height = b_pos[3] - b_pos[1]
-
-        # logging.debug("width and height: %s %s", width, height)
-
-        # Clip the start and end positions using the actual buffer size
-        start_x, start_y = self.cnvs.clip_to_buffer(b_pos[:2])
-        end_x, end_y = self.cnvs.clip_to_buffer(b_pos[2:4])
-
-        # logging.debug("clipped start and end: %s", (start_x, start_y, end_x, end_y))
+    def _draw_grid(self, ctx, b_points: List[Vec]):
+        # Calculate the width and height in buffer pixels. This may be wider and higher than the
+        # actual buffer, but cairo doesn't mind. Typically, the whole rectangle is visible.
+        width = math.dist(b_points[0], b_points[1])
+        height = math.dist(b_points[1], b_points[2])
 
         rep_x, rep_y = self.repetition
 
@@ -850,33 +853,35 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
 
         r, g, b, _ = self.colour
 
-        # If there are more repetitions in either direction than there
-        # are pixels, just fill a semi transparent rectangle
-        if width < rep_x or height < rep_y:
+        # If the line density is less than one every second pixel, it'd just look like a mess,
+        # so just fill a semi transparent rectangle
+        if step_x < 2 or step_y < 2:
             ctx.set_source_rgba(r, g, b, 0.5)
-            ctx.rectangle(
-                start_x, start_y,
-                int(end_x - start_x), int(end_y - start_y))
+            # Generic code to draw a polygon... though normally b_points should be 4 points
+            ctx.move_to(*b_points[0])
+            for p in b_points[1:]:
+                ctx.line_to(*p)
+            ctx.close_path()
             ctx.fill()
         else:
             ctx.set_source_rgba(r, g, b, 0.9)
             ctx.set_line_width(1)
             # ctx.set_antialias(cairo.ANTIALIAS_DEFAULT)
 
-            # The number of repetitions that fits into the buffer clipped
-            # selection
-            buf_rep_x = int((end_x - start_x) / step_x)
-            buf_rep_y = int((end_y - start_y) / step_y)
-            buf_shift_x = (b_pos[0] - start_x) % step_x
-            buf_shift_y = (b_pos[1] - start_y) % step_y
+            # Compute start and end of the "vertical" lines (if rotation == 0) by interpolating
+            # start and end points between vertex 0 -> 1 and 3 -> 2.
+            for i in range(1, rep_x):
+                p_start = b_points[0] + (b_points[1] - b_points[0]) * (i / rep_x)
+                p_end = b_points[3] + (b_points[2] - b_points[3]) * (i / rep_x)
+                ctx.move_to(p_start[0], p_start[1])
+                ctx.line_to(p_end[0], p_end[1])
 
-            for i in range(1, buf_rep_x):
-                ctx.move_to(start_x + buf_shift_x + i * step_x, start_y)
-                ctx.line_to(start_x + buf_shift_x + i * step_x, end_y)
-
-            for i in range(1, buf_rep_y):
-                ctx.move_to(start_x, start_y - buf_shift_y + i * step_y)
-                ctx.line_to(end_x, start_y - buf_shift_y + i * step_y)
+            # For "horizontal" lines (if rotation == 0), interpolate between vertex 0 -> 3 and 1 -> 2
+            for i in range(1, rep_y):
+                p_start = b_points[0] + (b_points[3] - b_points[0]) * (i / rep_y)
+                p_end = b_points[1] + (b_points[2] - b_points[1]) * (i / rep_y)
+                ctx.move_to(p_start[0], p_start[1])
+                ctx.line_to(p_end[0], p_end[1])
 
             ctx.stroke()
 
@@ -961,15 +966,17 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
 
         self.update_projection(b_point1, b_point2, b_point3, b_point4, (shift[0], shift[1], scale))
 
+        b_points = [b_point1, b_point2, b_point3, b_point4]
+
         if 0 not in self.repetition:
             # TODO: in any of these cases, also display the size labels
             if self.fill == self.FILL_POINT:
-                self._draw_points(ctx)
+                self._draw_points(ctx, b_points)
             elif self.fill == self.FILL_GRID:
-                self._draw_grid(ctx)
+                self._draw_grid(ctx, b_points)
 
-        self._draw_border(ctx, [b_point1, b_point2, b_point3, b_point4])
-        if self._should_draw_edges:  # FIXME
+        self._draw_border(ctx, b_points)
+        if self._should_draw_edges or True:  # FIXME
             self._draw_edges(ctx, b_point1, b_point2, b_point3, b_point4)
         # TODO: display size labels
         if self._should_draw_labels:

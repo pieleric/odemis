@@ -692,12 +692,12 @@ class OverlayTestCase(test.GuiTestCase):
         test.gui_loop()
         corners_back = rsol.get_physical_sel()
 
-        return # DEBUG
 
         for o, b in zip(corners, corners_back):
             testing.assert_tuple_almost_equal(o, b)
 
         rsol.repetition = (3, 2)
+        rsol.repetition = (100, 100)  #DEBUG
         rsol.fill = RepetitionSelectOverlay.FILL_POINT
 
         pos = cnvs.margins[0] + 10,  cnvs.margins[1] + 10
@@ -706,6 +706,8 @@ class OverlayTestCase(test.GuiTestCase):
 
         # cnvs.update_drawing()
         test.gui_loop(2)
+
+        return # DEBUG
 
         corners = util.rotate_rect((-0.1, -0.3, 0.4, 0.4), 0)
         rsol.set_physical_sel(corners)

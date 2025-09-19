@@ -1132,7 +1132,13 @@ class RectangleEditingMixin(DragMixin):
     hover_margin = 10  # px
 
     # TODO: drop center from here and from RectangleOverlay: not used anywhere, and normally automatically computed
-    def __init__(self, colour=gui.SELECTION_COLOUR, center=(0, 0)):
+    def __init__(self, colour=gui.SELECTION_COLOUR, center=(0, 0), can_rotate: bool=True):
+        """
+
+        :param colour:
+        :param center:
+        :param can_rotate: If True, allow the user to rotate the rectangle
+        """
 
         DragMixin.__init__(self)
 
@@ -1160,8 +1166,11 @@ class RectangleEditingMixin(DragMixin):
 
         self.colour = conversion.hex_to_frgba(colour)
         self.highlight = conversion.hex_to_frgba(gui.FG_COLOUR_HIGHLIGHT)
-        self.v_center = Vec(center)
+
+        self.can_rotate = can_rotate
+        # Rotation 0 means that point 1 -> 2 are aligned with the x axis (and in the same direction)
         self.rotation = 0.0  # radians
+        self.v_center = Vec(center)  # Center of the rectangle, used as rotation point
         # The rotation point in view coordinates
         # Hovering over this point's bounding box will result in the hover selection
         # as gui.HOVER_ROTATION. This will enable start_rotation and update_rotation methods
@@ -1301,18 +1310,20 @@ class RectangleEditingMixin(DragMixin):
 
     def update_rotation(self):
         """
-        Recomputes the rotation angle (.rotation) after the rectangle points have moved
+        Recomputes the rectangle based on the current mouse position.
+        Called when the user moves the mouse while dragging the rotation knob.
         """
-        current_pos = Vec(self.cnvs.clip_to_viewport(self.drag_v_end_pos))
-        dx = self.v_center.x - current_pos.x
-        dy = self.v_center.y - current_pos.y
-        current_rotation = math.atan2(dy, dx) % (2 * math.pi)
-        diff_angle = current_rotation - self.rotation
+        # The rotation knob is always at the same angle as the point1, so we can use it to know the
+        # previous rotation angle.
+        prev_rot = self._get_point_angle(self.v_point1)
+        knob_pos = Vec(self.cnvs.clip_to_viewport(self.drag_v_end_pos))
+        new_rot = self._get_point_angle(knob_pos)
+        diff_angle = new_rot - prev_rot
         self.v_point1 = self.v_point1.rotate(diff_angle, self.v_center)
         self.v_point2 = self.v_point2.rotate(diff_angle, self.v_center)
         self.v_point3 = self.v_point3.rotate(diff_angle, self.v_center)
         self.v_point4 = self.v_point4.rotate(diff_angle, self.v_center)
-        self.rotation = current_rotation
+        self._calc_rotation()
 
     def _set_rotation(self, target_rotation: float):
         """
@@ -1320,9 +1331,14 @@ class RectangleEditingMixin(DragMixin):
 
         :param target_rotation: The target rotation angle in radians.
         """
-        target_rotation = target_rotation % (2 * math.pi)
+        target_rotation %= 2 * math.pi
+
+        if not self.v_point1 or not self.v_point3:
+            self.rotation = target_rotation
+            return
+
         self._calc_center()
-        self._calc_rotation()
+        self._calc_rotation()  # Make sure self.rotation contains the previous rotation
         diff_angle = (target_rotation - self.rotation) % (2 * math.pi)
         self.v_point1 = self.v_point1.rotate(diff_angle, self.v_center)
         self.v_point2 = self.v_point2.rotate(diff_angle, self.v_center)
@@ -1358,7 +1374,8 @@ class RectangleEditingMixin(DragMixin):
         compared to the last time this method was called
 
         """
-
+        # Note: if the canvas is resized, in theory, shiftscale could be the same, but in practice,
+        # in Odemis, every canvas resize also changes the scale, so this is not an issue.
         if self._last_shiftscale != shiftscale:
             logging.debug("Updating view position of selection %s", shiftscale)
             self._last_shiftscale = shiftscale
@@ -1366,6 +1383,8 @@ class RectangleEditingMixin(DragMixin):
             self.v_point2 = Vec(self.cnvs.buffer_to_view(b_point2))
             self.v_point3 = Vec(self.cnvs.buffer_to_view(b_point3))
             self.v_point4 = Vec(self.cnvs.buffer_to_view(b_point4))
+
+            self._calc_edges()
 
     def _calc_center(self):
         """Calculate the center of selection."""
@@ -1375,30 +1394,46 @@ class RectangleEditingMixin(DragMixin):
             self.v_center = Vec(center_x, center_y)
 
     def _calc_rotation(self):
-        if self.v_point1 and self.v_center:
-            dx = self.v_center.x - self.v_point1.x
-            dy = self.v_center.y - self.v_point1.y
-            self.rotation = math.atan2(dy, dx) % (2 * math.pi)
+        if self.v_point1 and self.v_point2:
+            v = self.v_point2 - self.v_point1
+            self.rotation = math.atan2(v.y, v.x) % (2 * math.pi)
+            logging.debug("Recomputed rotation: %f rad", self.rotation)
+        else:
+            #DEBUG
+            logging.warning("Could not update rotation: missing points: %s, %s", self.v_point1, self.v_point2)
+
+    def _get_point_angle(self, point: Vec) -> float:
+        """ Get the angle of a point with respect to the center of the rectangle
+        :param point: The point for which to compute the angle
+        :return: The angle in radians
+        """
+        if self.v_center:
+            dx = point.x - self.v_center.x
+            dy = point.y - self.v_center.y
+            return math.atan2(dy, dx) % (2 * math.pi)
+        else:
+            return 0.0
 
     def _calc_edges(self):
         """ Calculate the inner and outer edges of the selection according to the hover margin """
 
         if self.v_point1 and self.v_point2 and self.v_point3 and self.v_point4:
             self._calc_center()
-            self._calc_rotation()
-            angle = math.atan2(self.v_point1.y - self.v_center.y, self.v_point1.x - self.v_center.x)
+            angle = self._get_point_angle(self.v_point1)
             self.v_rotation = Vec(
                 self.v_point1.x + 2 * self.hover_margin * math.cos(angle),
                 self.v_point1.y + 2 * self.hover_margin * math.sin(angle),
             )
-            rotation = [
-                EdgeBoundingBox(
-                    l=self.v_rotation.x - self.hover_margin,
-                    r=self.v_rotation.x + self.hover_margin,
-                    t=self.v_rotation.y - self.hover_margin,
-                    b=self.v_rotation.y + self.hover_margin,
-                )
-            ]
+            if self.can_rotate:
+                rotation = [
+                    EdgeBoundingBox(
+                        l=self.v_rotation.x - self.hover_margin,
+                        r=self.v_rotation.x + self.hover_margin,
+                        t=self.v_rotation.y - self.hover_margin,
+                        b=self.v_rotation.y + self.hover_margin,
+                    )
+                ]
+                self.v_edges[gui.HOVER_ROTATION] = rotation
 
             midpoints = [
                 EdgeBoundingBox(
@@ -1430,6 +1465,7 @@ class RectangleEditingMixin(DragMixin):
                     b=(self.v_point4.y + self.v_point1.y) / 2 + self.hover_margin,
                 ),
             ]
+            self.v_edges[gui.HOVER_LINE] = midpoints
 
             vertices = [
                 EdgeBoundingBox(
@@ -1461,14 +1497,7 @@ class RectangleEditingMixin(DragMixin):
                     b=self.v_point4.y + self.hover_margin,
                 ),
             ]
-
-            self.v_edges.update(
-                {
-                    gui.HOVER_ROTATION: rotation,
-                    gui.HOVER_LINE: midpoints,
-                    gui.HOVER_EDGE: vertices
-                }
-            )
+            self.v_edges[gui.HOVER_EDGE] = vertices
 
     def update_hover_direction(self, idx):
         if idx == 1:

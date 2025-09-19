@@ -637,6 +637,16 @@ class SeparateRectRotationTestCase(unittest.TestCase):
         # angle should be zero (allowing equivalent rotations)
         self.assertAlmostEqual(res_angle, 0.0)
 
+    def test_axis_aligned_no_rotation_neg(self):
+        rect = (-20.0, -20.0, 20.0, 20.0)
+        corners = rotate_rect(rect, 0.0)
+        res_rect, res_angle = util.separate_rect_rotation(corners)
+        # Check recovered rectangle coordinates
+        testing.assert_tuple_almost_equal(rect, res_rect)
+        # angle should be zero (allowing equivalent rotations)
+        self.assertAlmostEqual(res_angle, 0.0)
+
+
     def test_rotated_pi_over_4_about_center(self):
         rect = (-1.0, -1.0, 1.0, 1.0)
         angle = math.pi / 4

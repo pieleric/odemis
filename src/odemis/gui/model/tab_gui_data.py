@@ -572,7 +572,7 @@ class SparcAcquisitionGUIData(MicroscopyGUIData):
             #TOOL_ZOOM,
             #TOOL_ROI,
             TOOL_ROA,
-            TOOL_RO_ANCHOR,
+            # TOOL_RO_ANCHOR, #DEBUG
             TOOL_RULER,
             TOOL_SPOT,
         }

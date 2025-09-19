@@ -56,7 +56,8 @@ from odemis.gui.comp.overlay.pixel_select import PixelSelectOverlay
 from odemis.gui.comp.overlay.play_icon import PlayIconOverlay
 from odemis.gui.comp.overlay.point_select import PointSelectOverlay
 from odemis.gui.comp.overlay.points import PointsOverlay
-from odemis.gui.comp.overlay.repetition_select import RepetitionSelectOverlay
+from odemis.gui.comp.overlay.repetition_select import RepetitionSelectOverlay, \
+    OLDRepetitionSelectOverlay
 from odemis.gui.comp.overlay.spectrum_line_select import LineSelectOverlay, SpectrumLineSelectOverlay
 from odemis.gui.comp.overlay.spot_mode import SpotModeViewOverlay, SpotModeWorldOverlay
 from odemis.gui.comp.overlay.stage_point_select import StagePointSelectOverlay
@@ -678,8 +679,9 @@ class OverlayTestCase(test.GuiTestCase):
         cnvs = miccanvas.DblMicroscopeCanvas(self.panel)
 
         self.add_control(cnvs, wx.EXPAND, proportion=1, clear=True)
+        rotation = model.FloatContinuous(0, range=(0, 2 * math.pi), unit="rad")
 
-        rsol = RepetitionSelectOverlay(cnvs)
+        rsol = RepetitionSelectOverlay(cnvs, rotation=rotation)
         rsol.active.value = True
         cnvs.add_world_overlay(rsol)
         cnvs.scale = 400
@@ -689,15 +691,15 @@ class OverlayTestCase(test.GuiTestCase):
         wroi = [-0.1, 0.3, 0.2, 0.4]  # in m
         corners = util.rotate_rect(wroi, 0)
         rsol.set_physical_sel(corners)
+        # rsol.set_physical_sel(wroi)  #DEBUG
         test.gui_loop()
         corners_back = rsol.get_physical_sel()
-
 
         for o, b in zip(corners, corners_back):
             testing.assert_tuple_almost_equal(o, b)
 
         rsol.repetition = (3, 2)
-        rsol.repetition = (100, 100)  #DEBUG
+        rsol.repetition = (200, 200)  #DEBUG
         rsol.fill = RepetitionSelectOverlay.FILL_POINT
 
         pos = cnvs.margins[0] + 10,  cnvs.margins[1] + 10

@@ -355,7 +355,7 @@ class RectangleOverlay(EditableShape, RectangleEditingMixin, WorldOverlay):
                         len(self.points.value) == 0
                     ):  # that's different from RectangleEditingMixin
                         # Create new selection
-                        self.start_selection()
+                        self.start_creation()
                 elif hover == gui.HOVER_SELECTION:
                     # Clicked inside selection or near line, so start dragging
                     self.start_drag()

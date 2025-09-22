@@ -293,11 +293,14 @@ class Vec(tuple):
         # TODO: check lengths are compatible.
         return Vec(x - y for x, y in zip(self, a))
 
-    def __mul__(self, c):
+    def __mul__(self, c: float):
         return Vec(x * c for x in self)
 
-    def __rmul__(self, c):
+    def __rmul__(self, c: float):
         return Vec(c * x for x in self)
+
+    def __truediv__(self, c):
+        return Vec(x / c for x in self)
 
     @property
     def x(self):
@@ -1127,6 +1130,12 @@ class RectangleEditingMixin(DragMixin):
         |                |
         4 -------------- 3
 
+    There are 4 edition modes:
+    * CREATE: Create a new rectangle by dragging from point 1 to point 3. Rotation is *always* 0.
+    * EDIT: Edit the rectangle by dragging one of its edges or points. Rotation is kept as-is,
+      even if a point is dragged on the other side.
+    * DRAG: Drag the rectangle around by dragging inside the rectangle. Rotation is kept as-is.
+    * ROTATION: Rotate the rectangle by dragging the rotation point. Rotation is updated.
     """
 
     hover_margin = 10  # px
@@ -1182,15 +1191,16 @@ class RectangleEditingMixin(DragMixin):
     # stop_selection ends the current creation of rectangle
     # clear_selection resets the rectangle creation
 
-    def start_selection(self):
-        """ Start a new selection """
+    def start_creation(self):
+        """ Start a new rectangle. Always with rotation 0. """
 
         logging.debug("Starting selection")
 
         self.selection_mode = SEL_MODE_CREATE
         self.v_point1 = self.v_point3 = self.drag_v_start_pos
+        self.rotation = 0
 
-    def update_selection(self):
+    def update_creation(self):
         """ Update the selection to reflect the given mouse position """
         self.v_point3 = Vec(self.cnvs.clip_to_viewport(self.drag_v_end_pos))
         self.v_point2 = Vec(self.v_point3.x, self.v_point1.y)
@@ -1198,20 +1208,25 @@ class RectangleEditingMixin(DragMixin):
 
     def stop_selection(self):
         """ End the creation of the current selection """
-
         logging.debug("Stopping selection")
 
         if self.v_point1 == self.v_point3:
-            logging.debug("Selection too small")
+            logging.debug("Selection too small, marking it empty")
             self.clear_selection()
         else:
+            # Do not update the rotation here, it should be kept as-is, but make sure the points
+            # are in the correct order (which might not be the case if the user dragged a edge or point
+            # on the other side of the rectangle)
+            self._normalize_rectangle()
             self._calc_edges()
             self.selection_mode = SEL_MODE_NONE
             self.edit_hover = None
 
     def clear_selection(self):
-        """ Clear the selection """
-        logging.debug("Clearing selections")
+        """
+        Reset the rectangle selection to nothing.
+        """
+        logging.debug("Clearing selection")
 
         DragMixin.clear_drag(self)
 
@@ -1288,10 +1303,6 @@ class RectangleEditingMixin(DragMixin):
                     intercept = util.intercept_of_line(current_pos, slope)
                     self.v_point4 = Vec(util.project_point_on_line(self.v_point4, slope, intercept))
                     self.v_point3 = Vec(util.project_point_on_line(self.v_point3, slope, intercept))
-
-    def stop_edit(self):
-        """ End the selection edit """
-        self.stop_selection()
 
     # #### END edit methods  #####
 
@@ -1389,9 +1400,7 @@ class RectangleEditingMixin(DragMixin):
     def _calc_center(self):
         """Calculate the center of selection."""
         if self.v_point1 and self.v_point3:
-            center_x = (self.v_point1.x + self.v_point3.x) / 2
-            center_y = (self.v_point1.y + self.v_point3.y) / 2
-            self.v_center = Vec(center_x, center_y)
+            self.v_center = (self.v_point1 + self.v_point3) / 2
 
     def _calc_rotation(self):
         if self.v_point1 and self.v_point2:
@@ -1499,7 +1508,40 @@ class RectangleEditingMixin(DragMixin):
             ]
             self.v_edges[gui.HOVER_EDGE] = vertices
 
-    def update_hover_direction(self, idx):
+    def _normalize_rectangle(self) -> None :
+        """
+        Given 4 points of a rectangle, return them in the order point1, point2, point3, point4
+        where point1 is the top-left point (min, min) and the other points are in clockwise order.
+
+        :param point1: Vec
+        :param point3: Vec
+        :param rotation: The rotation of the rectangle in radians
+        :return: point1, point2, point3, point4 in clockwise order
+        1 -------------- 2
+        |                |
+        |                |
+        |                |
+        4 -------------- 3
+        """
+        point1 = self.v_point1
+        point3 = self.v_point3
+        logging.debug("Normalizing rectangle: %s, %s, %s, %s (rot=%f)",
+                      self.v_point1, self.v_point2, self.v_point3, self.v_point4, self.rotation)
+
+        # Convert the points to unrotated space
+        center = (point1 + point3) / 2
+        point1_a = point1.rotate(-self.rotation, center)
+        point3_a = point3.rotate(-self.rotation, center)
+
+        # Normalize the rectangle in unrotated space
+        rect = util.normalize_rect((point1_a.x, point1_a.y, point3_a.x, point3_a.y))
+        points = util.rotate_rect(rect, self.rotation, center)
+        points = [Vec(p) for p in points]
+        self.v_point1, self.v_point2, self.v_point3, self.v_point4 = points
+        logging.debug("After normalization: %s, %s, %s, %s (rot=%f)",
+                      self.v_point1, self.v_point2, self.v_point3, self.v_point4, self.rotation)
+
+    def get_edit_cursor_direction(self, idx):
         if idx == 1:
             point1 = self.v_point1
             point2 = self.v_point2
@@ -1512,6 +1554,9 @@ class RectangleEditingMixin(DragMixin):
         elif idx == 4:
             point1 = self.v_point4
             point2 = self.v_point1
+        else:
+            raise ValueError(f"Invalid point index {idx}")
+
         dx = abs(point1.x - point2.x)
         dy = abs(point1.y - point2.y)
         return gui.HOVER_DIRECTION_EW if dy > dx else gui.HOVER_DIRECTION_NS
@@ -1535,7 +1580,7 @@ class RectangleEditingMixin(DragMixin):
                 for edge in edges:
                     if edge.l < vx < edge.r and edge.t < vy < edge.b:
                         if hover == gui.HOVER_LINE:
-                            self.hover_direction = self.update_hover_direction(edge.index)
+                            self.hover_direction = self.get_edit_cursor_direction(edge.index)
                         return hover, edge.index
 
             # If the cursor position is inside the rectangle
@@ -1555,33 +1600,21 @@ class RectangleEditingMixin(DragMixin):
         if self.left_dragging:
             hover, idx = self.get_hover(self.drag_v_start_pos)
 
+            # Each of the functions update selection_mode to the corresponding value
             if not hover:
                 # Clicked outside selection, so create new selection
-                self.start_selection()
+                self.start_creation()
             elif hover == gui.HOVER_SELECTION:
                 # Clicked inside selection or near line, so start dragging
                 self.start_drag()
             elif hover == gui.HOVER_ROTATION:
                 # Clicked on the rotation point
                 self.start_rotation()
-            else:
+            elif hover in (gui.HOVER_LINE, gui.HOVER_EDGE):
                 # Clicked on an edit point (e.g. an edge or start or end point), so edit
                 self.start_edit(hover, idx)
-
-    def _on_left_up(self, evt):
-        """ Call this method from the 'on_left_up' method of super classes"""
-
-        DragMixin._on_left_up(self, evt)
-
-        # IMPORTANT: The check for selection clearing includes the left drag attribute for the
-        # following reason: When the (test) window was maximized by double clicking on the title bar
-        # of the window, the second 'mouse up' event would be processed by the overlay, causing it
-        # to clear any selection. Check for `left_dragging` makes sure that the mouse up is always
-        # paired with on of our own mouse downs.
-        if self.selection_mode == SEL_MODE_NONE and self.left_dragging:
-            self.clear_selection()
-        else:  # Editing an existing selection
-            self.stop_selection()
+            else:
+                logging.warning("Unhandled hover type: %s", hover)
 
     def _on_motion(self, evt):
 
@@ -1591,7 +1624,7 @@ class RectangleEditingMixin(DragMixin):
 
         if self.selection_mode:
             if self.selection_mode == SEL_MODE_CREATE:
-                self.update_selection()
+                self.update_creation()
             elif self.selection_mode == SEL_MODE_EDIT:
                 self.update_edit()
             elif self.selection_mode == SEL_MODE_DRAG:
@@ -1602,6 +1635,21 @@ class RectangleEditingMixin(DragMixin):
             self.cnvs.Refresh()
 
         # Cursor manipulation should be done in superclasses
+
+    def _on_left_up(self, evt):
+        """ Call this method from the 'on_left_up' method of super classes"""
+
+        DragMixin._on_left_up(self, evt)
+
+        # IMPORTANT: The check for selection clearing includes the left drag attribute for the
+        # following reason: When the (test) window was maximized by double-clicking on the title bar
+        # of the window, the second 'mouse up' event would be processed by the overlay, causing it
+        # to clear any selection. Check for `left_dragging` makes sure that the mouse up is always
+        # paired with on of our own mouse downs.
+        if self.selection_mode == SEL_MODE_NONE and self.left_dragging:
+            self.clear_selection()
+        else:  # Editing an existing selection
+            self.stop_selection()
 
 
 class LineEditingMixin(ClickMixin, DragMixin):

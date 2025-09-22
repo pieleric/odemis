@@ -450,11 +450,6 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
         self.p_point4 = None
         self.dashed = False  # FIXME: needed? We probably can hardcode it for now
 
-        # FIXME
-        self._bmp = None  # used to cache repetition with FILL_POINT
-        # ROI for which the bmp is valid
-        self._bmp_bpos = (None, None, None, None)
-
         # Labels for the bottom and right side length of the rectangle
         # Call draw_side_labels to use them
         self._side1_label = Label(
@@ -490,7 +485,6 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
     def fill(self, val):
         assert(val in [self.FILL_NONE, self.FILL_GRID, self.FILL_POINT])
         self._fill = val
-        self._bmp = None
 
     @property
     def repetition(self):
@@ -500,7 +494,6 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
     def repetition(self, val):
         assert(len(val) == 2)
         self._repetition = val
-        self._bmp = None
 
     def clear_selection(self):
         """ Clear the current selection """
@@ -549,6 +542,9 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
 
         :param corners: x, y position in m, or None to clear the selection
         """
+        if self.selection_mode is not None:
+            logging.warning("Cannot set physical selection while in selection mode")
+            return
         if corners is None:
             self.clear_selection()
         else:
@@ -585,7 +581,7 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
         # Position of the complete scan in physical coordinates
         sem_rect = self._get_scanner_rect()
 
-        # Take only the intersection so that that ROA is always inside the SEM scan
+        # Take only the intersection so that the ROA is always within the SEM scan
         phys_rect = util.rect_intersect(phys_rect, sem_rect)
         if phys_rect is None:
             return UNDEFINED_ROI
@@ -661,8 +657,11 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
 
     def on_rotation(self, rotation: float):
         """ Update the rotation of the rectangle """
+        if self.selection_mode is not None:
+            logging.warning("Cannot set physical selection while in selection mode")
+            return
+
         self._set_rotation(rotation)
-        self._bmp = None  # Reset the cache for points drawing
         wx.CallAfter(self.cnvs.request_drawing_update)
 
     # Event Handlers
@@ -693,6 +692,8 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
         #  RectangleOverlay completely overrides _on_left_up.
         #  is RectangleEditingMixin._on_left_up() doing the right thing?
         self._on_left_up(evt)  # Call the RectangleEditingMixin left up handler
+
+        self._view_to_phys()
 
         if self._roa:
             if self.p_point1 and self.p_point2 and self.p_point3 and self.p_point4:

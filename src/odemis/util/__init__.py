@@ -45,6 +45,8 @@ from decorator import decorator
 
 from . import weak
 
+UNDEFINED_ROI = (0,0,0,0)  # From odemis.acq.stream
+
 # Used in the type signature of `pairwise()` below such that we can define the
 # return type as a function of the input type.
 T = TypeVar("T")
@@ -433,7 +435,7 @@ def rotate_rect(rect: Tuple[float, float, float, float],
     :param rect: minx, miny, maxx, maxy positions of rectangle
     :param angle: angle of rotation in radians
     :param center: x, y coordinates of center point. If None, the rectangle center is used.
-    :return: position (x, y) of the 4 corners of the rotated rectangle
+    :return: position (x, y) of the 4 corners of the rotated rectangle (ordered clockwise, starting from minx, miny)
     """
     minx, miny, maxx, maxy = rect
     if center is None:
@@ -474,7 +476,18 @@ def separate_rect_rotation(corners: List[Tuple[float, float]],
     # Compute the rotation as the angle from corner 0 to corner 1
     x0, y0 = corners[0]
     x1, y1 = corners[1]
-    angle = math.atan2(y1 - y0, x1 - x0) % (2 * math.pi)
+    if x0 == x1 and y0 == y1:
+        #If corners 0 & 1 are at the same position, it's not possible to deduce the roation from them.
+        # atan2 always returns 0 rad in such case. So instead, we use corners 0 & 3 + 90° to define
+        # the rotation.
+        # FIXME: test case
+        x3, y3 = corners[3]
+        if x1 == x3 and y1 == y3:
+            return UNDEFINED_ROI, 0.0
+        angle = (math.atan2(y3 - y0, x3 - x0) + math.pi / 2) % (2 * math.pi)
+        logging.warning("Cannot determine rotation of rectangle using corners 1 & 2, using corner 3(%f, %f)", x0, y0)
+    else:
+        angle = math.atan2(y1 - y0, x1 - x0) % (2 * math.pi)
 
     # Rotate the first and third corner back to align with the axes
     cx = (x0 + corners[2][0]) / 2

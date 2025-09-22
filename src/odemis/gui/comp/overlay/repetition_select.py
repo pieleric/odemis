@@ -37,7 +37,7 @@ import odemis.gui.img as guiimg
 from odemis import util
 from odemis.acq.stream import UNDEFINED_ROI
 from odemis.gui.comp.overlay.base import RectangleEditingMixin, WorldOverlay, Vec, Label, \
-    SEL_MODE_EDIT, SEL_MODE_CREATE
+    SEL_MODE_EDIT, SEL_MODE_CREATE, SEL_MODE_NONE
 from odemis.util import units
 from odemis.util.comp import compute_scanner_fov, get_fov_rect
 
@@ -427,7 +427,8 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
           accordingly). Value is relative to the scanner (if passed), and otherwise it's absolute (in m).
         scanner (None or HwComponent): The scanner component to which the relative
          ROA. If None, the roa argument is interpreted as absolute physical coordinates (m). If it's a HwComponent, the roa will be interpreted as a ratio of its fielf of viewd.
-        :param rotation: FloatVA or None: the rotation of the rectangle in radians.
+        :param rotation: FloatVA or None: the rotation of the rectangle in radians (counter-clockwise).
+         If None, the rectangle cannot be rotated.
         """
         can_rotate = rotation is not None
         WorldOverlay.__init__(self, cnvs)
@@ -526,6 +527,8 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
             self.v_point3 = Vec(self.cnvs.phys_to_view(self.p_point3, offset))
         if self.p_point4:
             self.v_point4 = Vec(self.cnvs.phys_to_view(self.p_point4, offset))
+
+        self._normalize_rectangle()
         self._calc_edges()
 
     def get_physical_sel(self) -> Optional[List[Tuple[float, float]]]:
@@ -542,9 +545,10 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
 
         :param corners: x, y position in m, or None to clear the selection
         """
-        if self.selection_mode is not None:
-            logging.warning("Cannot set physical selection while in selection mode")
+        if self.selection_mode != SEL_MODE_NONE:
+            logging.warning("Cannot set physical selection while in selection mode: %s", self.selection_mode)
             return
+
         if corners is None:
             self.clear_selection()
         else:
@@ -557,7 +561,7 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
     def _get_scanner_rect(self):
         """
         Returns the (theoretical) scanning area of the scanner. Works even if the
-        scanner has not send any image yet.
+        scanner has not sent any image yet.
         returns (tuple of 4 floats): position in physical coordinates m (l, t, r, b)
         raises ValueError if scanner is not set or not actually a scanner
         """
@@ -639,6 +643,7 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
         roi (tuple of 4 floats): left, top, right, bottom position relative to the SEM image
 
         """
+        phys_rot = 2 * math.pi - self.rotation  # Y inverted => clockwise rotation becomes counter-clockwise
         if self._scanner:
             phys_rect = self.convert_roi_ratio_to_phys(roa)
         else:
@@ -647,21 +652,23 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
         if phys_rect is None:
             corners = None
         else:
-            corners = util.rotate_rect(phys_rect, self.rotation)
+            corners = util.rotate_rect(phys_rect, phys_rot)
 
         logging.debug("Converted RoA %s to physical %s + %s rad = %s",
-                      roa, phys_rect, self.rotation, corners)
+                      roa, phys_rect, phys_rot, corners)
 
         self.set_physical_sel(corners)
         wx.CallAfter(self.cnvs.request_drawing_update)
 
     def on_rotation(self, rotation: float):
         """ Update the rotation of the rectangle """
-        if self.selection_mode is not None:
-            logging.warning("Cannot set physical selection while in selection mode")
+        if self.selection_mode != SEL_MODE_NONE:
+            logging.warning("Cannot set physical selection while in selection mode: %s", self.selection_mode)
             return
 
-        self._set_rotation(rotation)
+        # Convert from rotation in physical coordinates to pixel coordinates:
+        # Y is inverted, so counter-clockwise becomes clockwise (in the coordinate system)
+        self._set_rotation(2 * math.pi - rotation)
         wx.CallAfter(self.cnvs.request_drawing_update)
 
     # Event Handlers
@@ -704,7 +711,7 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
                     rect = self.convert_roi_phys_to_ratio(phys_rect)
                 else:
                     rect = phys_rect
-                logging.debug("Converted corners %s to %s + %s rad = %s", corners,
+                logging.debug("Converted phys rect %s to %s + %s rad = %s", corners,
                               phys_rect, rotation, rect)
 
                 # Update VA. We need to unsubscribe to be sure we don't received
@@ -831,9 +838,9 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
 
         r, g, b, _ = self.colour
 
-        # If the line density is less than one every second pixel, it'd just look like a mess,
+        # If the line density is less than one every third pixel, it'd just look like a mess,
         # so just fill a semi transparent rectangle
-        if step_x < 2 or step_y < 2:
+        if step_x < 3 or step_y < 3:
             ctx.set_source_rgba(r, g, b, 0.5)
             # Generic code to draw a polygon... though normally b_points should be 4 points
             ctx.move_to(*b_points[0])
@@ -907,24 +914,24 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
         ctx.fill()
         ctx.stroke()
 
-    def _draw_border(self, ctx, b_points: List[Vec], line_width=4):
+    def _draw_border(self, ctx, b_points: List[Vec]):
         # Draws the rectangle border
         # TODO: refactor with RectangleOverlay.draw...?
-        # TODO: make it look more like the SPARC WorldSelectOverlay.draw()
-        # TODO: take points as argument
+        line_width = 4  # px
 
-        # draws the dotted line
+        lines = [((0, 0, 0, 0.5), []),  # Black background
+                 (self.colour, [2])]  # Dotted line
         ctx.set_line_width(line_width)
-        if self.dashed:
-            ctx.set_dash([2])
         ctx.set_line_join(cairo.LINE_JOIN_MITER)
-        ctx.set_source_rgba(*self.colour)
-        # Generic code to draw a polygon... though normally b_points should be 4 points
-        ctx.move_to(*b_points[0])
-        for p in b_points[1:]:
-            ctx.line_to(*p)
-        ctx.close_path()
-        ctx.stroke()
+        for colour, dash in lines:
+            ctx.set_dash(dash)
+            ctx.set_source_rgba(*colour)
+            # Generic code to draw a polygon... though normally b_points should be 4 points
+            ctx.move_to(*b_points[0])
+            for p in b_points[1:]:
+                ctx.line_to(*p)
+            ctx.close_path()
+            ctx.stroke()
 
         self._calc_edges()
 

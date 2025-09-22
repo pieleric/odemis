@@ -426,6 +426,7 @@ def expand_rect(rect, margin):
     minx, miny, maxx, maxy = rect
     return minx - margin, miny - margin, maxx + margin, maxy + margin
 
+
 def rotate_rect(rect: Tuple[float, float, float, float],
                 angle: float,
                 center: Optional[Tuple[float, float]] = None
@@ -464,11 +465,12 @@ def rotate_rect(rect: Tuple[float, float, float, float],
 
     return rotated_corners
 
+
 def separate_rect_rotation(corners: List[Tuple[float, float]],
                            ) -> Tuple[Tuple[float, float, float, float], float]:
     """
     Given a rectangle defined by its 4 corner points, return a rectangle aligned with the axes
-    plus an angle of rotation to be applied on the center.
+    plus an angle of rotation to be applied around the center.
     It assumes the corners correspond to a rotated rectangle (no noise).
     :param corners: position (x, y) of the 4 corners of the rectangle
     :return: (minx, miny, maxx, maxy) positions of rectangle, angle of rotation in radians (between 0 and 2pi)
@@ -511,6 +513,7 @@ def separate_rect_rotation(corners: List[Tuple[float, float]],
         rect.append(y_new + cy)
 
     return tuple(rect), angle
+
 
 def get_polygon_bbox(coordinates):
     """

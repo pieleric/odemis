@@ -445,38 +445,35 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
         if rotation:
             rotation.subscribe(self.on_rotation, init=True)
 
+        # Vec in physical coordinates (m), corresponding to the v_point* of RectangleEditingMixin
         self.p_point1 = None
         self.p_point2 = None
         self.p_point3 = None
         self.p_point4 = None
-        self.dashed = False  # FIXME: needed? We probably can hardcode it for now
 
         # Labels for the bottom and right side length of the rectangle
-        # Call draw_side_labels to use them
         self._side1_label = Label(
             text="",
             pos=(0, 0),
             font_size=12,
-            flip=True,
+            flip=False,
             align=wx.ALIGN_RIGHT,
-            colour=(1.0, 1.0, 1.0),  # default to white
+            colour=(1.0, 1.0, 1.0),  # white
             opacity=1.0,
             deg=None,
-            background=None
+            background=(0, 0, 0),  # black
         )
         self._side2_label = Label(
             text="",
             pos=(0, 0),
             font_size=12,
-            flip=True,
+            flip=False,
             align=wx.ALIGN_RIGHT,
-            colour=(1.0, 1.0, 1.0),  # default to white
+            colour=(1.0, 1.0, 1.0),  # white
             opacity=1.0,
             deg=None,
-            background=None
+            background=(0, 0, 0),  # black
         )
-
-        # TODO: need to listen to .active to redraw when this changes? Or is the redraw automatic?
 
     @property
     def fill(self):
@@ -669,6 +666,7 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
         # Convert from rotation in physical coordinates to pixel coordinates:
         # Y is inverted, so counter-clockwise becomes clockwise (in the coordinate system)
         self._set_rotation(2 * math.pi - rotation)
+        self._view_to_phys()
         wx.CallAfter(self.cnvs.request_drawing_update)
 
     # Event Handlers
@@ -690,16 +688,11 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
         """
         Check if left click was in rectangle. If so, select the overlay. Otherwise, unselect.
         """
-
         if not self.active.value:
             evt.Skip()
             return
 
-        # FIXME RectangleEditingMixin is only used for RectangleOverlay and here... but
-        #  RectangleOverlay completely overrides _on_left_up.
-        #  is RectangleEditingMixin._on_left_up() doing the right thing?
         self._on_left_up(evt)  # Call the RectangleEditingMixin left up handler
-
         self._view_to_phys()
 
         if self._roa:
@@ -707,12 +700,21 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
                 corners = self.get_physical_sel()
                 phys_rect, rotation = util.separate_rect_rotation(corners)
 
+                # TODO: clip rect to scanner FOV, with the rotation.
+                # See shapely.clip_by_rect() -> returns a polygon
+                # Then, need to find the largest rectangle withing the polygon (at a given rotation?).
+                # "Largest" is hard, but a simpler way is to find a rectangle staring from the first
+                # polygon point, shoot a horizontal ray, and find the first intersection, and
+                # same vertically.
+                # It gets tricky when there is a large rotation (eg 90°), as the rect could be
+                # larger than 1 in one dimension, and still correct.
+                # For now, we just assume there is no rotation, and clip the rectangle to the
+                # scanner FOV. It's not perfect, but at least it works fine when there is no rotation.
                 if self._scanner:
                     rect = self.convert_roi_phys_to_ratio(phys_rect)
                 else:
                     rect = phys_rect
-                logging.debug("Converted phys rect %s to %s + %s rad = %s", corners,
-                              phys_rect, rotation, rect)
+                logging.debug("Converted RoA %s (m) to %s + %s rad", corners, rect, rotation)
 
                 # Update VA. We need to unsubscribe to be sure we don't received
                 # intermediary values as the VA is modified by the stream further on, and
@@ -767,7 +769,7 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
         step_x = width / rep_x
         step_y = height / rep_y
 
-        # TODO: if too many points, just fill a rectangle too, to avoid taking too much time
+        # If too many points (> 50K), just fill a rectangle too, to avoid taking too much time
         if step_x < 4 or step_y < 4 or tot_positions > 50000:
             # If we cannot fit 3x3 px bitmaps into either direction,
             # then we just fill a semi transparent rectangle
@@ -785,12 +787,6 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
             ctx.set_line_width(1.5)
             # ctx.set_antialias(cairo.ANTIALIAS_DEFAULT)
 
-            logging.debug("Drawing %sx%s points", rep_x, rep_y)
-
-            # TODO: optimise, as it's gets slow when a lot of points are there (eg 100x100)
-            # The maths takes ~0.5s for 300x200 points => use numpy?
-            # Cairo drawing takes ~0.2s for 300x200 points
-
             # Compute point position as by interpolating vertically between vertex 0 -> 1,
             # and horizontally between vertex 0 -> 3.
             b_point0 = numpy.array(b_points[0])
@@ -805,24 +801,21 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
             # TODO: draw a "diamond" (aka square rotated by 45deg) instead of a small square?
             # It's about 4 times slower to draw by cairo, though... Or can we use a rotation matrix?
             # diamond_pos = numpy.array([[-1.5, 0], [0, -1.5], [1.5, 0], [0, 1.5]])
+            # corners = (diamond_pos + p_center).tolist()
+            # ctx.move_to(*corners[0])
+            # ctx.line_to(*corners[1])
+            # ctx.line_to(*corners[2])
+            # ctx.line_to(*corners[3])
+            # ctx.close_path()
+            # Currently, for 100x100 points it takes about 50ms to trace all the rectangles, and
+            # 100ms for cairo to "stroke" them. Drawing a diamond is about 4 times slower.
 
-            t_start = time.time()
             for x in numpy.linspace(hor_start, hor_end, rep_x):
                 for y in ver_shifts:
                     p_center = x + y
-                    # corners = (diamond_pos + p_center).tolist()
-                    # ctx.move_to(*corners[0])
-                    # ctx.line_to(*corners[1])
-                    # ctx.line_to(*corners[2])
-                    # ctx.line_to(*corners[3])
-                    # ctx.close_path()
                     ctx.rectangle(p_center[0] - 0.5, p_center[1] - 0.5, 1, 1)
 
-            logging.debug("Point tracing took %.3f s", time.time() - t_start)
-
-            t_start = time.time()
             ctx.stroke()
-            logging.debug("Cairo drawing took %.3f s", time.time() - t_start)
 
     def _draw_grid(self, ctx, b_points: List[Vec]):
         # Calculate the width and height in buffer pixels. This may be wider and higher than the
@@ -877,14 +870,6 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
         mid_point34 = Vec((b_point3.x + b_point4.x) / 2, (b_point3.y + b_point4.y) / 2)
         mid_point41 = Vec((b_point4.x + b_point1.x) / 2, (b_point4.y + b_point1.y) / 2)
 
-        # Note: the rotation point is always at a fixed distance from point1 (= bottom left if rotation=0)
-        # FIXME: rotation knob starts near point1, (top left), but jumps to the bottom left.
-        # when dragged from top left to bottom right. The rotation knob always starts at the
-        # drag start position, instead the rotation should default to 0°, so stay at the top left.
-        # FIXME: it seems that when resizing the rectangle to force the exchange of the corner points,
-        # the rotation point jumps to a wrong position. => it needs to match the
-        # FIXME: create by dragging from top right to left bottom, then, resize left side => trapeze
-
         # Draw the edit and rotation points
         ctx.set_dash([])
         ctx.set_line_width(1)
@@ -916,9 +901,10 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
 
     def _draw_border(self, ctx, b_points: List[Vec]):
         # Draws the rectangle border
-        # TODO: refactor with RectangleOverlay.draw...?
+        # TODO: refactor with RectangleOverlay.draw()...?
         line_width = 4  # px
 
+        # Draw a black border, and then a dotted coloured line on top
         lines = [((0, 0, 0, 0.5), []),  # Black background
                  (self.colour, [2])]  # Dotted line
         ctx.set_line_width(line_width)
@@ -935,7 +921,7 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
 
         self._calc_edges()
 
-    # From overlay.RectangleOverlay
+    # TODO: merge with overlay.RectangleOverlay
     def _draw_side_labels(self, ctx, b_point1: Vec, b_point2: Vec, b_point3: Vec, b_point4: Vec):
         """ Draw the labels for the side lengths of the rectangle"""
         points = {
@@ -952,29 +938,27 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
         b_xmax_ymax = points[p_xmax_ymax]
 
         side1_length = math.dist(p_xmin_ymin, p_xmax_ymin)
-        side1_angle = math.atan2((b_xmin_ymin.y - b_xmax_ymin.y), (b_xmin_ymin.x - b_xmax_ymin.x))
+        side1_angle = math.atan2((b_xmax_ymin.y - b_xmin_ymin.y), (b_xmax_ymin.x - b_xmin_ymin.x))
 
         side2_length = math.dist(p_xmax_ymax, p_xmax_ymin)
-        side2_angle = math.atan2((b_xmax_ymin.y - b_xmax_ymax.y), (b_xmax_ymin.x - b_xmax_ymax.x))
+        side2_angle = math.atan2((b_xmax_ymax.y - b_xmax_ymin.y), (b_xmax_ymax.x - b_xmax_ymin.x))
 
         # Shift the label a bit away from the rectangle, perpendicular to the side
-        shift_v = Vec(-20, -10).rotate(side1_angle, (0, 0))
+        shift_v = Vec(20, 10).rotate(side1_angle, (0, 0))
         self._side1_label.pos = Vec(
             (b_xmax_ymin.x + b_xmin_ymin.x) / 2 + shift_v.x,
             (b_xmax_ymin.y + b_xmin_ymin.y) / 2 + shift_v.y,
         )
         self._side1_label.text = units.readable_str(side1_length, "m", sig=3)
-        self._side1_label.background = (0, 0, 0)  # black
         self._side1_label.deg = math.degrees(side1_angle)
         self._side1_label.draw(ctx)
 
-        shift_v = Vec(-20, -10).rotate(side2_angle, (0, 0))
+        shift_v = Vec(20, 10).rotate(side2_angle, (0, 0))
         self._side2_label.pos = Vec(
             (b_xmax_ymax.x + b_xmax_ymin.x) / 2 + shift_v.x,
             (b_xmax_ymax.y + b_xmax_ymin.y) / 2 + shift_v.y,
         )
         self._side2_label.text = units.readable_str(side2_length, "m", sig=3)
-        self._side2_label.background = (0, 0, 0)  # black
         self._side2_label.deg = math.degrees(side2_angle)
         self._side2_label.draw(ctx)
 
@@ -999,9 +983,8 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
 
         b_points = [b_point1, b_point2, b_point3, b_point4]
 
-        # Don't show the repetitions when change the size of the rectangle, as it's incorrect
-        # (because the repetition is updated after finishing the edit), and it slows down the
-        # GUI interaction.
+        # Don't show the repetitions when resizing the rectangle, as (1) it's incorrect (because the
+        # repetition is updated after finishing the edit), and (2) it slows down the GUI interaction.
         if 0 not in self.repetition and self.selection_mode not in (SEL_MODE_EDIT, SEL_MODE_CREATE):
             if self.fill == self.FILL_POINT:
                 self._draw_points(ctx, b_points)
@@ -1009,6 +992,7 @@ class RepetitionSelectOverlay(WorldOverlay, RectangleEditingMixin):
                 self._draw_grid(ctx, b_points)
 
         self._draw_border(ctx, b_points)
+
         # When the user can edit the rectangle, show the edit points & size of the sides
         if self.active.value:
             self._draw_edit_knobs(ctx, b_point1, b_point2, b_point3, b_point4)

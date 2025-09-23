@@ -1140,13 +1140,12 @@ class RectangleEditingMixin(DragMixin):
 
     hover_margin = 10  # px
 
-    # TODO: drop center from here and from RectangleOverlay: not used anywhere, and normally automatically computed
-    def __init__(self, colour=gui.SELECTION_COLOUR, center=(0, 0), can_rotate: bool=True):
+    def __init__(self, colour=gui.SELECTION_COLOUR, can_rotate: bool=True):
         """
-
-        :param colour:
-        :param center:
-        :param can_rotate: If True, allow the user to rotate the rectangle
+        :param colour: line colour of the rectangle
+        :param can_rotate: If True, allow the user to rotate the rectangle. Note that even if this
+          is False, it's still possible to set a rotated rectangle programmatically. The user will
+          not be able to change the rotation.
         """
 
         DragMixin.__init__(self)
@@ -1177,13 +1176,14 @@ class RectangleEditingMixin(DragMixin):
         self.highlight = conversion.hex_to_frgba(gui.FG_COLOUR_HIGHLIGHT)
 
         self.can_rotate = can_rotate
-        # Rotation 0 means that point 1 -> 2 are aligned with the x axis (and in the same direction)
+        # Rotation angle is the angle between the X axis and the segment of point 1 -> 2.
+        # (so rotation == 0 rad means aligned with the x axis and in the same direction)
         self.rotation = 0.0  # radians
-        self.v_center = Vec(center)  # Center of the rectangle, used as rotation point
+        self.v_center = Vec(0, 0)  # Center of the rectangle, used as rotation point
         # The rotation point in view coordinates
         # Hovering over this point's bounding box will result in the hover selection
         # as gui.HOVER_ROTATION. This will enable start_rotation and update_rotation methods
-        self.v_rotation = Vec(center)
+        self.v_rotation = Vec(0, 0)
 
     # #### selection methods  #####
     # start_selection starts creation of the rectangle with diagonal points v_point1 and v_point3
@@ -1324,6 +1324,8 @@ class RectangleEditingMixin(DragMixin):
         Recomputes the rectangle based on the current mouse position.
         Called when the user moves the mouse while dragging the rotation knob.
         """
+        # TODO: if Ctrl is pressed, snap to 45 degree increments (on the .rotation value)
+
         # The rotation knob is always at the same angle as the point1, so we can use it to know the
         # previous rotation angle.
         prev_rot = self._get_point_angle(self.v_point1)

@@ -784,20 +784,31 @@ class OverlayTestCase(test.GuiTestCase):
         for o, b in zip(ebeam_corners, roi_back):
             assert_tuple_almost_equal(o, b, msg="ebeam FoV (%s) != ROI (%s)" % (ebeam_corners, roi_back))
 
-        return  # DEBUG
-
-        # FIXME: add rotation
         # Half the FoV
         roa.value = (0.25, 0.25, 0.75, 0.75)
         test.gui_loop(0.1)
-        # Expect the whole SEM FoV
+        # Expect the half SEM FoV
         fov = compute_scanner_fov(ebeam)
         fov = (fov[0] / 2, fov[1] / 2)
         ebeam_rect = get_fov_rect(ebeam, fov)
+        ebeam_corners = util.rotate_rect(ebeam_rect, 0)
         roi_back = rsol.get_physical_sel()
 
-        for o, b in zip(ebeam_rect, roi_back):
-            self.assertAlmostEqual(o, b, msg="ebeam FoV (%s) != ROI (%s)" % (ebeam_rect, roi_back))
+        for o, b in zip(ebeam_corners, roi_back):
+            assert_tuple_almost_equal(o, b, msg="ebeam FoV (%s) != ROI (%s)" % (ebeam_corners, roi_back))
+
+        # With some rotation (but no clipping)
+        rotation.value = 0.1  # rad
+        test.gui_loop(0.1)
+        # Expect the half SEM FoV, with a little bit of rotation
+        fov = compute_scanner_fov(ebeam)
+        fov = (fov[0] / 2, fov[1] / 2)
+        ebeam_rect = get_fov_rect(ebeam, fov)
+        ebeam_corners = util.rotate_rect(ebeam_rect, 0.1)
+        roi_back = rsol.get_physical_sel()
+
+        for o, b in zip(ebeam_corners, roi_back):
+            assert_tuple_almost_equal(o, b, msg="ebeam FoV (%s) != ROI (%s)" % (ebeam_corners, roi_back))
 
         test.gui_loop()
 

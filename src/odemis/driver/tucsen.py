@@ -2289,35 +2289,41 @@ class TUCam(model.DigitalCamera):
 
         logging.debug("Waiting for up to %g s", timeout)
 
-        tstart = time.time()
-        tend = tstart + timeout
-        # Wait until the frame has arrived
-        while True:
+        # FIXME: need a way to stop the capture early when then stop_generate() is called.
+        # Options:
+        # * call AbortWait() from stop_generate(), after sending the STOP message, and make sure it
+        #   is always called before starting another frame acquisition, and never between the last
+        #   check for the STOP message and the call for the current frame acquisition.
+        # * call capture_frame() in a separate thread. Call AbortWait() when receiving a STOP message,
+        #   and make sure to not call it while the separate thread hasn't started calling capture_frame()
+        # * Use callback mechanism of the DLL to be notified when a frame is ready. See TUCAM_Buf_DataCallBack
+        #   and TUCAM_Buf_GetData(). Recommended by Tucsen when frame rate is high. The callback
+        #   can add a message to the queue that the data is ready, and the acquisition thread can
+        #   wait for that message, with a timeout. It retrieves the data when notified.
+
+        # Check one last time just before blocking
+        if self._acq_should_stop():
+            return True
+
+        try:
+            array = self._dll.capture_frame(timeout)  # Never wait too long
+            logging.debug("Received image of %s after %s s", array.shape,
+                          time.time() - start_t)
+
             if self._acq_should_stop():
                 return True
+        except TUCamError as ex:
+            # Timeout is expected for any exposure time >= 0.1s
+            if ex.errno == TUCAMRET_Enum.TUCAMRET_TIMEOUT.value:
+                logging.warning("Timeout after %g s", time.time() - start_t)
+                raise TimeoutError(f"Timeout after {time.time() - start_t} s")
+            else:
+                raise
 
-            try:
-                array = self._dll.capture_frame(timeout=0.1)  # Never wait too long
-                logging.debug("Received image of %s after %s s", array.shape,
-                              time.time() - start_t)
-
-                if self._acq_should_stop():
-                    return True
-
-                # An image!
-                da = model.DataArray(array, metadata)
-                self.data.notify(self._transposeDAToUser(da))
-                return False
-            except TUCamError as ex:
-                # Timeout is expected for any exposure time >= 0.1s
-                if ex.errno == TUCAMRET_Enum.TUCAMRET_TIMEOUT.value:
-                    if time.time() > tend:
-                        logging.warning("Timeout after %g s", time.time() - tstart)
-                        raise TimeoutError(f"Timeout after {time.time() - tstart} s")
-                    else:
-                        logging.debug("Waiting a little longer")
-                else:
-                    raise
+        # An image!
+        da = model.DataArray(array, metadata)
+        self.data.notify(self._transposeDAToUser(da))
+        return False
 
     def _acquire_images(self):
         try:

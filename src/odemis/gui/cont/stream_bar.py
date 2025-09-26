@@ -701,6 +701,8 @@ class StreamBarController(object):
                     spots.is_active.value = False
                     spots.is_active.value = True
 
+                logging.debug("Spot mode now activated")
+
             # put it back to the beginning of the list to indicate it's the
             # latest stream used
             l = self._tab_data_model.streams.value
@@ -742,7 +744,9 @@ class StreamBarController(object):
         self.preparation_future.cancel()
         if updated:
             self._main_data_model.is_preparing.value = True
+            logging.debug("Preparing %s", stream.name.value)
             self.preparation_future = stream.prepare()
+            logging.debug("Done starting to prepare %s", stream.name.value)
             cb_on_prepare = functools.partial(self._canActivate, stream)
             self.preparation_future.add_done_callback(cb_on_prepare)
         else:
@@ -750,6 +754,7 @@ class StreamBarController(object):
 
     @call_in_wx_main
     def _canActivate(self, stream, future):
+        logging.debug("Done Preparing %s", stream.name.value)
         self._main_data_model.is_preparing.value = False
         if future.cancelled():
             logging.debug("Not activating %s as its preparation was cancelled", stream.name.value)

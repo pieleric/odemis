@@ -423,6 +423,7 @@ class EllipsisAnimator(RepeatingTimer):
             # Compute how many dots to display (0->3)
             n = int((time.time() / self.period) % 4)
             msg = self._status_msg.replace("…", "." * n)
+            logging.debug("updating status message to \"%s\"", msg) #DEBUG
             self._label.SetLabel(msg)
         except Exception:
             logging.exception("Unexpected failure during status message animation")

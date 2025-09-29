@@ -282,6 +282,7 @@ class SECOMCLSettingsStream(acqstream.CCDSettingsStream):
                                          range=((0, 0, 0, 0), (1, 1, 1, 1)),
                                          cls=(int, float),
                                          setter=self._setROI)
+        self.rotation = model.FloatContinuous(0, range=(0, 2 * math.pi), unit="rad", readonly=True)
 
         # Start with pixel size to fit 1024 px, as it's typically a sane value
         # for the user (and adjust for the hardware).
@@ -685,7 +686,7 @@ class CLAcqPlugin(Plugin):
     spots on the sample along a grid. Can also be used as a plugin.
     """
     name = "CL acquisition for SECOM"
-    __version__ = "2.1"
+    __version__ = "2.2"
     __author__ = "Éric Piel, Lennard Voortman, Sabrina Rossberger"
     __license__ = "Public domain"
 
@@ -735,15 +736,16 @@ class CLAcqPlugin(Plugin):
         :param microscope: (Microscope or None) The main back-end component.
         :param main_app: (wx.App) The main GUI component.
         """
-        super(CLAcqPlugin, self).__init__(microscope, main_app)
+        super().__init__(microscope, main_app)
 
         # Can only be used with a microscope
         if not microscope:
             return
         else:
-            # Check which stream the microscope supports
+            # Typically it's supposed to run on a SECOM, but let's be "open-minded", and
+            # just check that all required components are there.
             self.main_data = self.main_app.main_data
-            if not (self.main_data.ccd and self.main_data.ebeam):
+            if not (self.main_data.ccd and self.main_data.ebeam and self.main_data.sed):
                 return
 
         self.exposureTime = self.main_data.ccd.exposureTime

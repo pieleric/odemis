@@ -1039,7 +1039,6 @@ class SEMCCDMDStream(MultipleDetectorStream):
             else:
                 acquirer = SEMCCDAcquirerScanStage(self)
         elif self._supports_hw_sync():
-            logging.debug("Running hw sync")
             acquirer = SEMCCDAcquirerHwSync(self)
         else:
             if model.hasVA(self._emitter, "scanPath"):
@@ -1237,6 +1236,10 @@ class SEMCCDMDStream(MultipleDetectorStream):
                 MD_ROTATION: rotation,
             }
             self._acq_mask = numpy.zeros(self._sem_shape, dtype=bool)
+
+            logging.debug("Starting acquisition of %s px @ dt = %s s, roi = %s, rotation = %s rad",
+                            rep, acquirer.snapshot_time * acquirer.integration_count,
+                            self.roi.value, rotation)
 
             self._last_ccd_update = 0  # TODO: move to _prepare_live_pixel()?
             # Iterate for the polarisations
@@ -3674,6 +3677,8 @@ class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
         # Note: if the stream has "local VA" (ie, copy of the component VA), then it is assumed that
         # the component VA has already been set to the correct value. (ie, linkHwVAs() has been called)
 
+        # max_snapshot_duration is expected to be None, as we do not support integration/leeches.
+        assert max_snapshot_duration is None
         if self._mdstream._integrationTime and self._mdstream._integrationCounts.value > 1:
             # We would need to request the e-beam scanner to duplicate each pixel N times.
             # (in order to send N triggers to the CCD)
@@ -3697,7 +3702,7 @@ class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
 
         # Note: no need to update the CCD settings selected by the user here, as it has already been
         # done via the SettingsStream.
-        # FIXME: that's not true for the exposureTime *if* integrationTime is used.
+        # TODO: that's not true for the exposureTime *if* integrationTime is used.
 
         # Set the CCD to hardware synchronised acquisition
         # Note, when it's not directly the actual CCD, but a CompositedSpectrometer, the settings
@@ -3770,7 +3775,7 @@ class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
         Stop the spatial acquisition, so that the pixel acquisition can start.
         """
         # make sure it's all stopped
-        for s, sub in zip(self._mdstream._streams, self._mdstream._subscribers):
+        for s, sub in zip(self._mdstream._streams, self._mdstream._hwsync_subscribers):
             s._dataflow.unsubscribe(sub)
         self._mdstream._ccd_df.synchronizedOn(None)
         self._mdstream._df0.synchronizedOn(None)
@@ -3824,6 +3829,8 @@ class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
                 sem_data = q.get(timeout=self.snapshot_time * 3 + 5)
             except queue.Empty:
                 raise TimeoutError(f"Timeout while waiting for SEM data after {time.time() - self._start_area_t} s")
+            self._mdstream._check_cancelled()
+
             logging.debug("Got SEM data from %s", s)
             s._dataflow.unsubscribe(sub)
 
@@ -3872,6 +3879,7 @@ class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
             ccd_data = self._mdstream._acq_data_queue[self._mdstream._ccd_idx].get(timeout=timeout)
         except queue.Empty:
             raise TimeoutError(f"Timeout while waiting for CCD data after {timeout} s")
+        self._mdstream._check_cancelled()
 
         ccd_data = self._mdstream._preprocessData(self._mdstream._ccd_idx, ccd_data, px_idx)
         ret_das.append(ccd_data)

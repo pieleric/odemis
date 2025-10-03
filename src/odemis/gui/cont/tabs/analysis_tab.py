@@ -448,13 +448,15 @@ class AnalysisTab(Tab):
             for viewport in self.view_controller.viewports:
                 if hasattr(viewport.canvas, "pixel_overlay"):
                     ol = viewport.canvas.pixel_overlay
-                    ol.set_data_properties(pixel_width, center_position, (width, height))
+                    # ol.set_data_properties(pixel_width, center_position, (width, height))
+                    ol.set_stream(spec_stream)
                     ol.connect_selection(spec_stream.selected_pixel, spec_stream.selectionWidth)
 
                 # TODO: to be done by the MicroscopeViewport or DblMicroscopeCanvas (for each stream with a selected_line)
                 if hasattr(viewport.canvas, "line_overlay") and hasattr(spec_stream, "selected_line"):
                     ol = viewport.canvas.line_overlay
-                    ol.set_data_properties(pixel_width, center_position, (width, height))
+                    # ol.set_data_properties(pixel_width, center_position, (width, height))
+                    ol.set_stream(spec_stream)
                     ol.connect_selection(
                         spec_stream.selected_line,
                         spec_stream.selectionWidth,

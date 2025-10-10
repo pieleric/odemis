@@ -1877,22 +1877,28 @@ class MeteorJeol1PostureManager(MeteorPostureManager):
             missed_axes = {'x', 'y', 'z', 'rx', 'rz'} - self.stage.axes.keys()
             raise KeyError(f"The stage misses {missed_axes} axes")
 
-        # Automatic conversion to sample-stage axes (similar to Tescan)
-        # self._initialise_transformation(axes=["y", "z"], rotation=self.pre_tilt)
+        # Automatic conversion to sample-stage axes
+        self._initialise_transformation(axes=["y", "z"])
         self.postures = [SEM_IMAGING, FM_IMAGING]
 
-    def check_calib_data(self, required_keys: set):
-        """
-        Checks the keys in the stage metadata MD_CALIB.
-        :param required_keys : A set of keys that must be present in the MD_CALIB metadata.
-        :raises ValueError: if the metadata does not have all required keys.
-        """
-        stage_md = self.stage.getMetadata()
-        calibrated_md = stage_md[model.MD_CALIB]
-        if not required_keys.issubset(calibrated_md.keys()):
-            missing_keys = required_keys - calibrated_md.keys()
-            raise ValueError(
-                f"Stage metadata {model.MD_CALIB} is missing the following required keys: {missing_keys}.")
+    def create_sample_stage(self):
+        self.sample_stage = SampleStage(name="Sample Stage",
+                                        role="stage",
+                                        stage_bare=self.stage,
+                                        posture_manager=self)
+
+    # def check_calib_data(self, required_keys: set):
+    #     """
+    #     Checks the keys in the stage metadata MD_CALIB.
+    #     :param required_keys : A set of keys that must be present in the MD_CALIB metadata.
+    #     :raises ValueError: if the metadata does not have all required keys.
+    #     """
+    #     stage_md = self.stage.getMetadata()
+    #     calibrated_md = stage_md[model.MD_CALIB]
+    #     if not required_keys.issubset(calibrated_md.keys()):
+    #         missing_keys = required_keys - calibrated_md.keys()
+    #         raise ValueError(
+    #             f"Stage metadata {model.MD_CALIB} is missing the following required keys: {missing_keys}.")
 
     def getTargetPosition(self, target_pos_lbl: int) -> Dict[str, float]:
         """

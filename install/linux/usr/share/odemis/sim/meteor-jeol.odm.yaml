@@ -74,19 +74,19 @@
 }
 
 # TODO: not needed
-"Meteor Stage": {
-    class: actuator.MultiplexActuator,
-    role: stage,
-    dependencies: { "x": "Stage", "y": "Stage", "z": "Stage", },
-    init: {
-        axes_map: { "x": "x", "y": "y", "z": "z",},
-    },
-    #affects: ["Camera", "EBeam"],
-    metadata: {
-        # Should match exactly the FM imaging range metadata for the "Stage" component!
-        POS_ACTIVE_RANGE: {"x": [-55.e-3, -44.75e-3], "y": [-8.25e-3, 8.25e-3], "z": [5.5e-3, 11.5e-3]}
-    },
-}
+#"Meteor Stage": {
+#    class: actuator.MultiplexActuator,
+#    role: stage,
+#    dependencies: { "x": "Stage", "y": "Stage", "z": "Stage", },
+#    init: {
+#        axes_map: { "x": "x", "y": "y", "z": "z",},
+#    },
+#    #affects: ["Camera", "EBeam"],
+#    metadata: {
+#        # Should match exactly the FM imaging range metadata for the "Stage" component!
+#        POS_ACTIVE_RANGE: {"x": [-55.e-3, -44.75e-3], "y": [-8.25e-3, 8.25e-3], "z": [5.5e-3, 11.5e-3]}
+#    },
+#}
 
 "Light Source": {
     class: omicronxx.HubxX,

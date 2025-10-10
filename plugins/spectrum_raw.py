@@ -4,7 +4,7 @@ Created on 1 Sep 2023
 
 @author: Éric Piel
 
-Gives ability to acquire a spectrum data, while keeping the raw CCD image
+Gives ability to acquire a spectrum data, while keeping the raw CCD image (ie, without vertical binning)
 
 Copyright © 2023 Éric Piel, Delmic
 
@@ -23,7 +23,7 @@ see http://www.gnu.org/licenses/.
 
 import logging
 from collections import OrderedDict
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 import numpy
 
@@ -196,9 +196,11 @@ class SEMSpectrumRawMDStream(SEMCCDMDStream):
     def _prepare(self):
         return self._sccd._prepare()
 
-    def _assembleLiveData(self, n, raw_data, px_idx, px_pos, rep, pol_idx=0):
+    def _assembleLiveData(self, n, raw_data, px_idx, px_pos,
+                          rep: Tuple[int, int], pol_idx: int = 0,
+                          pos_center: Tuple[float, float] = None):
         if n != self._ccd_idx:
-            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx)
+            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx, pos_center)
 
         # Raw data format is YC, where Y is the CCD Y... but there is already the Y of the e-beam.
         # So we report it as a T dimension, which makes the data exporter happy and Odemis viewer happy.
@@ -209,10 +211,11 @@ class SEMSpectrumRawMDStream(SEMCCDMDStream):
         if pol_idx > len(self._live_data[n]) - 1:
             # New polarization => new DataArray
             md = raw_data.metadata.copy()
-            # Compute metadata to match the SEM metadata
-            center, pxs = self._get_center_pxs(rep, (1, 1), self._pxs, px_pos)
-            md.update({MD_POS: center,
-                       MD_PIXEL_SIZE: pxs,
+            # Update metadata to match the SEM metadata
+            rotation = self.rotation.value
+            md.update({MD_POS: pos_center,
+                       MD_PIXEL_SIZE: self._pxs,
+                       MD_ROTATION: rotation,
                        MD_DIMS: "CTZYX",
                        MD_DESCRIPTION: self._streams[n].name.value})
 
@@ -225,7 +228,7 @@ class SEMSpectrumRawMDStream(SEMCCDMDStream):
             # Make sure it doesn't contain metadata related to AR
             for k in (model.MD_AR_POLE, model.MD_AR_MIRROR_BOTTOM, model.MD_AR_MIRROR_TOP,
                       model.MD_AR_FOCUS_DISTANCE, model.MD_AR_HOLE_DIAMETER, model.MD_AR_PARABOLA_F,
-                      model.MD_AR_XMAX, model.MD_ROTATION):
+                      model.MD_AR_XMAX):
                 md.pop(k, None)
 
             # Shape of spectrum data = CT1YX
@@ -304,7 +307,7 @@ SPECTRUM_RAW_CONFIG = OrderedDict((
 
 class SpectrumRawPlugin(Plugin):
     name = "Spectrum Raw acquisition"
-    __version__ = "1.1"
+    __version__ = "1.2"
     __author__ = "Éric Piel"
     __license__ = "GPLv2"
 

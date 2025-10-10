@@ -36,7 +36,7 @@ from odemis.acq.leech import AnchorDriftCorrector, LeechAcquirer
 from odemis.acq.stream._live import LiveStream
 from odemis.model import MD_POS, MD_DESCRIPTION, MD_PIXEL_SIZE, MD_ACQ_DATE, MD_AD_LIST, \
     MD_DWELL_TIME, MD_DIMS, MD_THETA_LIST, MD_WL_LIST, MD_ROTATION, \
-    MD_ROTATION_COR
+    MD_ROTATION_COR, MD_POL_NONE
 from odemis.model import hasVA
 from odemis.util import units, executeAsyncTask, almost_equal, img, angleres
 from odemis.util.driver import guessActuatorMoveDuration
@@ -1372,9 +1372,11 @@ class SEMCCDMDStream(MultipleDetectorStream):
         if n != self._ccd_idx:
             return super()._assembleFinalData(n, data)
 
-        if len(data) > 1:  # Multiple polarizations => keep them separated, and add the polarization name to the description
-            for d in data:
-                d.metadata[model.MD_DESCRIPTION] += " " + d.metadata[model.MD_POL_MODE]
+        # if len(data) > 1:  # Multiple polarizations => keep them separated, and add the polarization name to the description
+        if self._analyzer and data:
+            if len(data) > 1 or data[0].metadata.get(model.MD_POL_MODE, MD_POL_NONE) != MD_POL_NONE:
+                for d in data:
+                    d.metadata[model.MD_DESCRIPTION] += " " + d.metadata[model.MD_POL_MODE]
 
         self._raw.extend(data)
 
@@ -2065,7 +2067,7 @@ class SEMSpectrumMDStream(SEMCCDMDStream):
             assert px_idx == (0, 0)  # We expect that the first pixel is always the top left pixel
             # New polarization => new DataArray
             md = raw_data.metadata.copy()
-            # Compute metadata to match the SEM metadata
+            # Update metadata to match the SEM metadata
             rotation = self.rotation.value
             md.update({MD_POS: pos_center,
                        MD_PIXEL_SIZE: self._pxs,

@@ -41,6 +41,8 @@ from concurrent.futures._base import CancelledError
 import copy
 import logging
 import math
+from typing import Tuple
+
 import numpy
 from odemis import dataio, model, util, gui
 from odemis.acq import leech, acqmng
@@ -597,11 +599,13 @@ class SECOMCLSEMMDStream(acqstream.SEMCCDMDStream):
         # Return something, but not the data to avoid data being cached.
         return model.DataArray(numpy.array([0]))
 
-    def _assembleLiveData(self, n, raw_data, px_idx, px_pos, rep, pol_idx=0):
+    def _assembleLiveData(self, n, raw_data, px_idx, px_pos,
+                          rep: Tuple[int, int], pol_idx: int = 0,
+                          pos_center: Tuple[float, float] = None):
         if n != self._ccd_idx:
-            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx)
+            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx, pos_center)
 
-        # For other streams (CL) don't do a live update
+        # For other streams (CL) don't do a live update (as it's directly stored in a file).
         return
 
     def _assembleFinalData(self, n, data):
@@ -686,7 +690,7 @@ class CLAcqPlugin(Plugin):
     spots on the sample along a grid. Can also be used as a plugin.
     """
     name = "CL acquisition for SECOM"
-    __version__ = "2.2"
+    __version__ = "2.3"
     __author__ = "Éric Piel, Lennard Voortman, Sabrina Rossberger"
     __license__ = "Public domain"
 

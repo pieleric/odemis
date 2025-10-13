@@ -50,8 +50,7 @@
             "version": "jeol_1"
         },
         FAV_FM_POS_ACTIVE: {
-            #+40 degrees tilt
-            "rx": 0.69813,
+            "rx": 0.69813,  # rad (40°)
             "rz": 0.0
         },
         FAV_SEM_POS_ACTIVE: {

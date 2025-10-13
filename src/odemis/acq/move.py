@@ -517,11 +517,13 @@ class MeteorPostureManager(MicroscopePostureManager):
         :param shear: shear from sample to stage
         """
         self._axes_dep = {"x": axes[0], "y": axes[1]}  # Should be called y, z... or even better: also take x as first axis
+        # FIXME: move _update_conversion() here, without using the metadata
         self._metadata[model.MD_POS_COR] = translation
         self._metadata[model.MD_ROTATION_COR] = rotation
         self._metadata[model.MD_PIXEL_SIZE_COR] = scale
         self._metadata[model.MD_SHEAR_COR] = shear
         self._update_conversion()
+        self._initialise_offset()
 
     def _update_conversion(self):
         """
@@ -575,6 +577,33 @@ class MeteorPostureManager(MicroscopePostureManager):
                                  MILLING: tf_sr,
                                  UNKNOWN: tf_sr}
 
+        # FIXME: de-duplicate
+        # Shift (x,y,z) from sample-stage to stage-bare coordinates
+        self._offset = {p: numpy.array([0,0,0]) for p in self.postures}
+
+    def _initialise_offset(self):
+        stage_md = self.stage.getMetadata()
+
+        # Grid positions are defined in the stage bare coordinates, on the SEM_IMAGING posture
+        # They only contain the linear axes (x, y, z, m).
+        # The rotation axes are defined on MD_FAV_SEM_POS_ACTIVE.
+        sem_grid1_pos = stage_md[model.MD_SAMPLE_CENTERS][POSITION_NAMES[GRID_1]]
+        sem_grid1_pos.update(stage_md[model.MD_FAV_SEM_POS_ACTIVE])
+
+        # Shift (x,y,z) from sample-stage to stage-bare coordinates
+        self._offset = {p: numpy.array([0, 0, 0]) for p in self.postures}
+        # We define the position in SEM_IMAGING as the reference, it's arbitrary, but using the SEM
+        # coordinates system means the positions will look similar to the one on the SEM software,
+        # which is handy.
+        d = self.to_sample_stage_from_stage_position(sem_grid1_pos, SEM_IMAGING)
+        ref_grid1_pos = numpy.array([d["x"], d["y"], d["z"]])
+        for p in self.postures:
+            grid1_pos = self.to_posture(sem_grid1_pos, p)
+            dp = self.to_sample_stage_from_stage_position(grid1_pos, p)
+            dp_sample = numpy.array([dp["x"], dp["y"], dp["z"]])
+            self._offset[p] = dp_sample - ref_grid1_pos
+            logging.debug("offset for posture %s: %s", POSITION_NAMES[p], self._offset[p])
+
     def _get_scan_rotation(self) -> float:
         """
         Get the scan rotation value for SEM/FIB, and ensure they match.
@@ -626,6 +655,7 @@ class MeteorPostureManager(MicroscopePostureManager):
         q = numpy.array([pos["x"], pos["y"], pos["z"]])
         if posture is None:
             posture = self.current_posture.value
+        q += self._offset[posture]
         pinv = self._transforms[posture] @ q
 
         # add orientation (rx, rz)
@@ -650,6 +680,7 @@ class MeteorPostureManager(MicroscopePostureManager):
         if posture is None:
             posture = self.current_posture.value
         q = self._inv_transforms[posture] @ p
+        q -= self._offset[posture]
 
         qpos = {}
         qpos["x"] = q[0]
@@ -791,8 +822,8 @@ class MeteorTFS1PostureManager(MeteorPostureManager):
         # forced conversion to sample-stage axes
         comp = model.getComponent(name="Linked YZ")
         self.pre_tilt = comp.getMetadata()[model.MD_ROTATION_COR]
-        self._initialise_transformation(axes=["y", "z"], rotation=self.pre_tilt)
         self.postures = [SEM_IMAGING, FM_IMAGING]
+        self._initialise_transformation(axes=["y", "z"], rotation=self.pre_tilt)
 
     def getTargetPosition(self, target_pos_lbl: int) -> Dict[str, float]:
         """
@@ -1083,9 +1114,9 @@ class MeteorTFS3PostureManager(MeteorTFS1PostureManager):
         if not {"x", "y", "rz", "rx"}.issubset(self.stage.axes):
             raise KeyError("The stage misses 'x', 'y', 'rx' or 'rz' axes")
 
+        self.postures = [SEM_IMAGING, FM_IMAGING]
         self._initialise_transformation(axes=["y", "z"], rotation=self.pre_tilt)
         self.create_sample_stage()
-        self.postures = [SEM_IMAGING, FM_IMAGING]
         # These positions are "optional", and only used with Odemis advanced
         stage_md = self.stage.getMetadata()
         if model.MD_FAV_MILL_POS_ACTIVE in stage_md:
@@ -1254,9 +1285,9 @@ class MeteorZeiss1PostureManager(MeteorPostureManager):
             comp = model.getComponent(name="Linked YM")
             self.pre_tilt = comp.getMetadata()[model.MD_ROTATION_COR]
 
+        self.postures = [SEM_IMAGING, FM_IMAGING]
         # Automatic conversion to sample-stage axes
         self._initialise_transformation(axes=["y", "m"], rotation=self.pre_tilt)
-        self.postures = [SEM_IMAGING, FM_IMAGING]
 
     def from_sample_stage_to_stage_position(self, pos: Dict[str, float]) -> Dict[str, float]:
         new_pos = super().from_sample_stage_to_stage_position(pos)
@@ -1573,8 +1604,8 @@ class MeteorTescan1PostureManager(MeteorPostureManager):
         scale = (1, 1 / math.cos(rx_fm))
 
         # Automatic conversion to sample-stage axes
-        self._initialise_transformation(axes=["y", "z"], rotation=self.pre_tilt, shear=shear, scale=scale)
         self.postures = [SEM_IMAGING, FM_IMAGING]
+        self._initialise_transformation(axes=["y", "z"], rotation=self.pre_tilt, shear=shear, scale=scale)
 
     def check_calib_data(self, required_keys: set):
         """
@@ -1880,15 +1911,12 @@ class MeteorJeol1PostureManager(MeteorPostureManager):
         if self.pre_tilt is None:
             self.pre_tilt = 0  # Standard on JEOL is no pre-tilt (ie, 0°)
 
+        self.postures = [SEM_IMAGING, FM_IMAGING]
         # Automatic conversion to sample-stage axes
         self._initialise_transformation(axes=["y", "z"])
         self.create_sample_stage()
-        self.postures = [SEM_IMAGING, FM_IMAGING]
 
     def create_sample_stage(self):
-
-        # TODO: add translation so in the stage, so that the 0 in FM is the same as in SEM
-        # (ie, - rx and -ry)
         self.sample_stage = SampleStage(name="Sample Stage",
                                         role="stage",
                                         stage_bare=self.stage,
@@ -1961,6 +1989,9 @@ class MeteorJeol1PostureManager(MeteorPostureManager):
         dx = calibrated_values["dx"]
         dy = calibrated_values["dy"]
         dz = calibrated_values.get("dz", 0)
+
+        # TODO: confirm this is needed for JEOL. rx is between Z and the X&Y plane. So why does it need to
+        # adjust the Y? Is that because center of rotation is not at the sample surface?
 
         # Apply tilt-dependent correction (similar to Tescan approach)
         z_offset = pos["z"] - z_0

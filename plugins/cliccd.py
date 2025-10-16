@@ -56,17 +56,16 @@ class SEMCLCCDStream(SEMCCDMDStream):
         return super()._preprocessData(n, data, i)
 
     def _assembleLiveData(self, n, raw_data, px_idx, px_pos,
-                          rep: Tuple[int, int], pol_idx: int = 0,
-                          pos_center: Tuple[float, float] = None):
+                          rep: Tuple[int, int], pol_idx: int):
         if n != self._ccd_idx:
-            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx, pos_center)
+            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx)
 
         if pol_idx > len(self._live_data[n]) - 1:
             # New polarization => new DataArray
             md = raw_data.metadata.copy()
             # Update metadata to match the SEM metadata
             rotation = self.rotation.value
-            md.update({MD_POS: pos_center,
+            md.update({MD_POS: self._roa_center_phys,
                        MD_PIXEL_SIZE: self._pxs,
                        MD_ROTATION: rotation,
                        MD_DIMS: "YX",

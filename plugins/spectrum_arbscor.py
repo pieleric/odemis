@@ -203,23 +203,20 @@ class SEMSpectrumArbitraryOrderMDStream(SEMSpectrumMDStream):
 
     def _assembleLiveData(self, n: int, raw_data: "DataArray",
                           px_idx: Tuple[int, int], px_pos: Tuple[float, float],
-                          rep: Tuple[int, int], pol_idx: int = 0,
-                          pos_center: Tuple[float, float] = None):
+                          rep: Tuple[int, int], pol_idx: int):
         """
         Wrapper for _assembleLiveData() to convert back the standard px_idx (eg, (0,0), (0,1), (0,2)...)
         into the index that was actually scanned at that moment.
         :param px_idx: y, x position
         :param pxs_pos: position of center of data in m: x, y
         :param rep: x, y number of points in the scan
-        :param pos_center: physical position of the center of the complete RoA in m (x, y).
         For other parameters, see MultipleDetectorStream._assembleLiveData()
         """
         px_idx_flat = px_idx[0] * rep[0] + px_idx[1]
         act_px_idx = self._px_order[px_idx_flat][::-1]
-        # FIXME: update pos_center accordingly
         logging.debug("Converted back idx %s to %s", px_idx, act_px_idx)
 
-        return super()._assembleLiveData(n, raw_data, act_px_idx, px_pos, rep, pol_idx, pos_center)
+        return super()._assembleLiveData(n, raw_data, act_px_idx, px_pos, rep, pol_idx)
 
 
 class SpectrumArbitraryScanOrderPlugin(Plugin):

@@ -600,10 +600,9 @@ class SECOMCLSEMMDStream(acqstream.SEMCCDMDStream):
         return model.DataArray(numpy.array([0]))
 
     def _assembleLiveData(self, n, raw_data, px_idx, px_pos,
-                          rep: Tuple[int, int], pol_idx: int = 0,
-                          pos_center: Tuple[float, float] = None):
+                          rep: Tuple[int, int], pol_idx: int):
         if n != self._ccd_idx:
-            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx, pos_center)
+            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx)
 
         # For other streams (CL) don't do a live update (as it's directly stored in a file).
         return

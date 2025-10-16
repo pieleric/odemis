@@ -1,10 +1,17 @@
+# Simulator of the METEOR JEOL, for the JIB4700F.
+# There are two options to run it:
+# * Use the JEOL EIK server simulator (runs on the local PC), which can be run
+#   python3 src/odemis/driver/jeol/api/eik/server.py --port 8000
+# * Use the Multibeam Offline program (runs on a remote/virtual Windows PC)
+
+
 "METEOR Jeol Sim": {
   class: Microscope,
   role: meteor,
 }
 
 "SEM": {
-    class: eiksem.Sem,
+    class: jeol.EIKSEM,
     role: null,
     init: {
         #Settings if using JEOL External Control Server simulator running on the local PC

@@ -170,6 +170,7 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
         # Information about the scanning, computed just before running an acquisition
         self._pxs = None  # (float, float): pixel size in the CCD data (so, independent of fuzzing)
         self._scanner_pxs = None  # (float, float): pixel size of the scanner (only different from the pixel size if fuzzing)
+        self._roa_center_phys = None  # (float, float) RoA center position in physical coordinates
 
         # currently scanned area location based on px_idx, or None if no scanning
         self._current_scan_area = None  # l,t,r,b (int)
@@ -711,8 +712,7 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
 
     def _assembleLiveData(self, n: int, raw_data: model.DataArray,
                           px_idx: Tuple[int, int], px_pos: Optional[Tuple[float, float]],
-                          rep: Tuple[int, int], pol_idx: int = 0,
-                          pos_center: Tuple[float, float] = None):
+                          rep: Tuple[int, int], pol_idx: int):
         """
         Update the ._live_data structure with the last acquired data. So that it is suitable to display in the
         live update overlay and can be converted by _assembleFinalData into the final ._raw.
@@ -723,16 +723,14 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
         :param rep: size of entire data being assembled (aka repetition) in pixels: x, y
         :param pol_idx: polarisation index related to name as defined in pos_polarizations variable
         (0 if no polarisation)
-        :param pos_center: physical position of the center of the complete RoA in m (x, y).
         """
         # TODO: check it works here too.
         self._store_tint(n, raw_data)
-        self._assembleLiveDataTiles(n, raw_data, px_idx, px_pos, rep, pol_idx, pos_center)
+        self._assembleLiveDataTiles(n, raw_data, px_idx, px_pos, rep, pol_idx)
 
     def _assembleLiveDataTiles(self, n: int, raw_data: model.DataArray,
                                px_idx: Tuple[int, int], px_pos: Optional[Tuple[float, float]],
-                               rep: Tuple[int, int], pol_idx: int = 0,
-                               pos_center: Tuple[float, float] = None):
+                               rep: Tuple[int, int], pol_idx: int):
         """
         Assemble one tile into a single DataArray. All tiles should be of the same size.
         On the first tile, the DataArray is created and stored in ._live_data.
@@ -748,18 +746,16 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
         :param rep: size of entire data being assembled (aka repetition) in pixels: x, y
         :param pol_idx: polarisation index related to name as defined in pos_polarizations variable
         uses fuzzing
-        :param pos_center: physical position of the center of the complete RoA in m (x, y).
         """
         tile_shape = raw_data.shape
 
         if pol_idx > len(self._live_data[n]) - 1:
-            assert px_idx == (0, 0)  # We expect that the first pixel is always the top left pixel
             # New polarization => new DataArray
             md = raw_data.metadata.copy()
             # sub_pxs: if not fuzzing, that's the same as pixel size
             sub_pxs = self._pxs[0] / tile_shape[1], self._pxs[1] / tile_shape[0]  # tile_shape is Y,X
             rotation = self.rotation.value
-            md.update({MD_POS: pos_center,
+            md.update({MD_POS: self._roa_center_phys,
                        MD_PIXEL_SIZE: sub_pxs,
                        MD_ROTATION: rotation,
                        MD_DESCRIPTION: self._streams[n].name.value})
@@ -775,8 +771,7 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
 
     def _assembleLiveData2D(self, n: int, raw_data: model.DataArray,
                             px_idx: Tuple[int, int], pos_lt: Optional[Tuple[float, float]],
-                            rep: Tuple[int, int], pol_idx: int = 0,
-                            pos_center: Tuple[float, float] = None):
+                            rep: Tuple[int, int], pol_idx: int):
         """
         Copies to the complete (live_data) DataArray representing spatial data (of shape YX).
         It supports receiving a block of pixel of arbitrary shape (assuming it fits in the complete
@@ -788,7 +783,6 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
         :param pos_lt: unused, should be None.
         :param rep: repetition frame/ size of entire frame
         :param pol_idx: polarisation index related to name as defined in pos_polarizations variable
-        :param pos_center: physical position of the center of the complete RoA in m (x, y).
         """
         self._store_tint(n, raw_data)
 
@@ -802,10 +796,9 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
 
         # New polarization => new DataArray
         if pol_idx > len(self._live_data[n]) - 1:
-            assert px_idx == (0, 0)  # We expect that the first pixel is always the top left pixel
             md = raw_data.metadata.copy()
             rotation = self.rotation.value
-            md.update({MD_POS: pos_center,
+            md.update({MD_POS: self._roa_center_phys,
                        MD_PIXEL_SIZE: self._pxs,
                        MD_ROTATION: rotation,
                        MD_DESCRIPTION: self._streams[n].name.value})
@@ -1225,6 +1218,7 @@ class SEMCCDMDStream(MultipleDetectorStream):
             # Last preparation (after the leeches were run)
             acquirer.prepare_acquisition()
             self._pxs = acquirer.pxs  # Used by some of the data assembling functions
+            self._roa_center_phys = acquirer.pos_center
 
             # DEBUG: merge into _reset_live_data()
             rotation = self.rotation.value
@@ -1288,7 +1282,7 @@ class SEMCCDMDStream(MultipleDetectorStream):
                     for s_idx, da in enumerate(pixel_das):
                         if da is None:
                             continue
-                        self._assembleLiveData(s_idx, da, px_idx, px_pos, rep, pol_idx, acquirer.pos_center)
+                        self._assembleLiveData(s_idx, da, px_idx, px_pos, rep, pol_idx)
 
                     # Run _updateImage thread to update the live image of the SEM data
                     #DEBUG  do it explicitly here, instead of every time a SEM tile is received?
@@ -1302,10 +1296,7 @@ class SEMCCDMDStream(MultipleDetectorStream):
                 for s_idx, da in enumerate(spatial_das):
                     if da is None:
                         continue
-                    # pos_lt is None as we use pos_center
-                    # TODO: drop pos_lt from the call ? It's not used anywhere
-                    self._assembleLiveData2D(s_idx, da, (0, 0), None, rep, pol_idx,
-                                             acquirer.pos_center)
+                    self._assembleLiveData2D(s_idx, da, (0, 0), None, rep, pol_idx)
 
             # Stop the acquisition
             dur = time.time() - start_t
@@ -1532,9 +1523,9 @@ class SEMMDStream(MultipleDetectorStream):
 
             tot_num = numpy.prod(rep)
 
-            pos_center = self._getCenterPositionPhys()
             self._pxs = self._getPixelSize()
             self._scanner_pxs = self._emitter.pixelSize.value  # sub-pixel size
+            self._roa_center_phys = self._getCenterPositionPhys()
 
             # initialize leeches
             leech_np, leech_time_ppx = self._startLeeches(px_time, tot_num, (rep[1], rep[0]))
@@ -1640,7 +1631,7 @@ class SEMMDStream(MultipleDetectorStream):
                         raise IOError("No data received for stream %s" % (self._streams[i].name.value,))
 
                     das[-1] = self._preprocessData(i, das[-1], px_idx)
-                    self._assembleLiveData2D(i, das[-1], px_idx, None, rep, 0, pos_center)
+                    self._assembleLiveData2D(i, das[-1], px_idx, None, rep, 0)
 
                 self._shouldUpdateImage()
 
@@ -1796,9 +1787,9 @@ class SEMMDStream(MultipleDetectorStream):
 
             tot_num = numpy.prod(rep)
 
-            pos_center = self._getCenterPositionPhys()  # Independent of rotation
             self._pxs = self._getPixelSize()
             self._scanner_pxs = self._emitter.pixelSize.value  # sub-pixel size
+            self._roa_center_phys = self._getCenterPositionPhys()  # Independent of rotation
 
             # initialize leeches
             leech_np, leech_time_ppx = self._startLeeches(px_time, tot_num, (rep[1], rep[0]))
@@ -1898,7 +1889,7 @@ class SEMMDStream(MultipleDetectorStream):
 
                     raw_da = scan.vector_data_to_img(last_da, (n_x, n_y), scan_margin, md_cor)
                     raw_da = self._preprocessData(i, raw_da, px_idx)
-                    self._assembleLiveData2D(i, raw_da, px_idx, None, rep, 0, pos_center)
+                    self._assembleLiveData2D(i, raw_da, px_idx, None, rep, 0)
 
                 self._shouldUpdateImage()
 
@@ -2053,23 +2044,23 @@ class SEMSpectrumMDStream(SEMCCDMDStream):
     image).
     """
 
-    def _assembleLiveData(self, n, raw_data, px_idx, px_pos,
-                          rep: Tuple[int, int], pol_idx: int = 0, pos_center: Tuple[float, float] = None):
+    def _assembleLiveData(self, n: int, raw_data: model.DataArray,
+                          px_idx: Tuple[int, int], px_pos: Tuple[float, float],
+                          rep: Tuple[int, int], pol_idx: int):
         """
         See description on MultipleDetectorStream._assembleLiveData().
         """
         if n != self._ccd_idx:
-            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx, pos_center)
+            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx)
 
         spec_shape = raw_data.shape
 
         if pol_idx > len(self._live_data[n]) - 1:
-            assert px_idx == (0, 0)  # We expect that the first pixel is always the top left pixel
             # New polarization => new DataArray
             md = raw_data.metadata.copy()
             # Update metadata to match the SEM metadata
             rotation = self.rotation.value
-            md.update({MD_POS: pos_center,
+            md.update({MD_POS: self._roa_center_phys,
                        MD_PIXEL_SIZE: self._pxs,
                        MD_ROTATION: rotation,
                        MD_DIMS: "CTZYX",
@@ -2108,13 +2099,12 @@ class SEMTemporalMDStream(SEMCCDMDStream):
 
     def _assembleLiveData(self, n: int, raw_data: model.DataArray,
                           px_idx: Tuple[int, int], px_pos: Tuple[float, float],
-                          rep: Tuple[int, int], pol_idx: int = 0,
-                          pos_center: Tuple[float, float] = None) -> None:
+                          rep: Tuple[int, int], pol_idx: int):
         """
         See description on MultipleDetectorStream._assembleLiveData().
         """
         if n != self._ccd_idx:
-            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx, pos_center)
+            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx)
 
         # The time-correlator data is of shape 1,T. So the first
         # dimension can always be discarded and the second dimension is T.
@@ -2125,7 +2115,7 @@ class SEMTemporalMDStream(SEMCCDMDStream):
             # New polarization => new DataArray
             md = raw_data.metadata.copy()
             pxs = self._pxs
-            center = pos_center
+            center = self._roa_center_phys
             rotation = self.rotation.value
             md.update({MD_POS: center,
                        MD_PIXEL_SIZE: pxs,
@@ -2149,13 +2139,12 @@ class SEMAngularSpectrumMDStream(SEMCCDMDStream):
 
     def _assembleLiveData(self, n: int, raw_data: model.DataArray,
                           px_idx: Tuple[int, int], px_pos: Tuple[float, float],
-                          rep: Tuple[int, int], pol_idx: int = 0,
-                          pos_center: Tuple[float, float] = None):
+                          rep: Tuple[int, int], pol_idx: int):
         """
         See description on MultipleDetectorStream._assembleLiveData().
         """
         if n != self._ccd_idx:
-            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx, pos_center)
+            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx)
 
         # Raw data format is AC
         # Final data format is CAZYX with spec_res, angle_res, 1 , X , Y with X, Y = 1 at one ebeam position
@@ -2168,7 +2157,7 @@ class SEMAngularSpectrumMDStream(SEMCCDMDStream):
             md = raw_data.metadata.copy()
             pxs = self._pxs
             rotation = self.rotation.value
-            md.update({MD_POS: pos_center,
+            md.update({MD_POS: self._roa_center_phys,
                        MD_PIXEL_SIZE: pxs,
                        MD_ROTATION: rotation,
                        MD_DIMS: "CAZYX",
@@ -2264,12 +2253,12 @@ class SEMTemporalSpectrumMDStream(SEMCCDMDStream):
 
     def _assembleLiveData(self, n: int, raw_data: model.DataArray,
                           px_idx: Tuple[int, int], px_pos: Tuple[float, float],
-                          rep: Tuple[int, int], pol_idx: int = 0, pos_center: Tuple[float, float] = None):
+                          rep: Tuple[int, int], pol_idx: int):
         """
         See description on MultipleDetectorStream._assembleLiveData().
         """
         if n != self._ccd_idx:
-            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx, pos_center)
+            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx)
 
         # Data format is CTZYX with spec_res, temp_res, 1 , X , Y with X, Y = 1 at one ebeam position
         temp_res = raw_data.shape[0]
@@ -2279,9 +2268,8 @@ class SEMTemporalSpectrumMDStream(SEMCCDMDStream):
             md = raw_data.metadata.copy()
             # Compute metadata to match the SEM metadata
             pxs = self._pxs
-            center = pos_center
             rotation = self.rotation.value
-            md.update({MD_POS: center,
+            md.update({MD_POS: self._roa_center_phys,
                        MD_PIXEL_SIZE: pxs,
                        MD_ROTATION: rotation,
                        MD_DIMS: "CTZYX",
@@ -2319,13 +2307,12 @@ class SEMARMDStream(SEMCCDMDStream):
     """
     def _assembleLiveData(self, n: int, raw_data: model.DataArray,
                           px_idx: Tuple[int, int], px_pos: Tuple[float, float],
-                          rep: Tuple[int, int], pol_idx: int = 0,
-                          pos_center: Tuple[float, float] = None):
+                          rep: Tuple[int, int], pol_idx: int):
         """
         See description on MultipleDetectorStream._assembleLiveData().
         """
         if n != self._ccd_idx:
-            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx, pos_center)
+            return super()._assembleLiveData(n, raw_data, px_idx, px_pos, rep, pol_idx)
 
         # MD_POS default to position at the center of the FoV, but it needs to be
         # the position of the e-beam for this pixel (without the shift for drift correction)
@@ -2847,7 +2834,8 @@ class SEMCCDAcquirer(abc.ABC):
 
         self.pxs = self._mdstream._getPixelSize() # physical size a whole pixel in m (X,Y)
         self._rep = self._mdstream.repetition.value # number of pixels in the spatial image (of the CL data)
-        self.pos_center = None  # position of the center of the spatial acquisition in physical coordinates in m (X,Y)
+        # Position of the center of the RoA in physical coordinates (independent of rotation)
+        self.pos_center = self._mdstream._getCenterPositionPhys()  # m, m (X,Y)
         self.tile_size = (1, 1)  # number of sub-pixels in the SEM spatial image (X,Y) (= 1,1 if no fuzzing)
 
         # the coordinates (X,Y) of each point scanned (2D index) in px relative to the center of the FoV
@@ -2872,8 +2860,6 @@ class SEMCCDAcquirer(abc.ABC):
         Compute the spot positions (in scanner coordinates) and prepare for calculation of
         position in sample coordinates. Also compute center position in sample coordinates.
         """
-        self.pos_center = self._mdstream._getCenterPositionPhys()  # Independent of rotation
-
         rep = self._rep
         roi = self._mdstream.roi.value
         rotation = self._mdstream.rotation.value
@@ -3477,8 +3463,6 @@ class SEMCCDAcquirerScanStage(SEMCCDAcquirerRectangle):
         """
         # Absolute position of the center of the FoV (at init)
         self.center_fov = self._mdstream._emitter.getMetadata().get(MD_POS, (0, 0))
-        # Absolute position of the center of the RoI
-        self.pos_center = self._mdstream._getCenterPositionPhys()
         # Relative position of the center of the RoI from the center of the FoV
         self.pos_center_rel = (self.pos_center[0] - self.center_fov[0],
                                self.pos_center[1] - self.center_fov[1])

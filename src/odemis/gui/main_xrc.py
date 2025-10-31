@@ -1268,7 +1268,6 @@ class xrcpnl_tab_sparc2_align(wx.Panel):
         self.btn_align_ek = xrc.XRCCTRL(self, "btn_align_ek")
         self.btn_align_streakcam = xrc.XRCCTRL(self, "btn_align_streakcam")
         self.btn_align_fiber = xrc.XRCCTRL(self, "btn_align_fiber")
-        self.btn_align_tc = xrc.XRCCTRL(self, "btn_align_tc")
         self.btn_align_light_in = xrc.XRCCTRL(self, "btn_align_light_in")
         self.btn_align_light_in_ar = xrc.XRCCTRL(self, "btn_align_light_in_ar")
         self.btn_align_tunnel_lens = xrc.XRCCTRL(self, "btn_align_tunnel_lens")
@@ -14944,26 +14943,6 @@ b\xeb\x85\x9f\xb6B\x1d\x0cK\x17\xac\xf0\x12\xfe\xa0\xe5\xee\xe03\xb1\xfa\
                         </object>
                         <flag>wxEXPAND</flag>
                         <cellpos>5,6</cellpos>
-                      </object>
-                      <object class="sizeritem">
-                        <object class="GraphicRadioButton" name="btn_align_tc">
-                          <icon>______img_icon_ico_fib_png</icon>
-                          <icon_on>______img_icon_ico_fib_green_png</icon_on>
-                          <height>48</height>
-                          <face_colour>def</face_colour>
-                          <label>LAB CUBE</label>
-                          <fg>#1A1A1A</fg>
-                          <font>
-                            <size>11</size>
-                            <sysfont>wxSYS_DEFAULT_GUI_FONT</sysfont>
-                          </font>
-                          <style>wxALIGN_CENTRE</style>
-                          <XRCED>
-                            <assign_var>1</assign_var>
-                          </XRCED>
-                        </object>
-                        <flag>wxEXPAND</flag>
-                        <cellpos>5,7</cellpos>
                       </object>
                       <object class="sizeritem">
                         <object class="GraphicRadioButton" name="btn_align_light_in">

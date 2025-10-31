@@ -1106,6 +1106,26 @@ STREAM_SETTINGS_CONFIG = {
         )),
     stream.ScannedTemporalSettingsStream:
         OrderedDict((
+            # From spectrograph, if the time-correlator is coupled after the spectrograph
+            ("wavelength", {
+                "tooltip": "Center wavelength of the spectrograph",
+                "control_type": odemis.gui.CONTROL_FLT,
+                "range": (0.0, 1900e-9),
+                "key_step_min": 1e-9,
+            }),
+            ("grating", {}),
+            ("slit-in", {
+                "label": "Input slit",
+                "tooltip": "Opening size of the spectrograph input slit.\nA wide opening is usually fine.",
+            }),
+            ("filter-in", {  # filter.band axis
+                "label": "Input filter",
+                "choices": util.format_band_choices,
+            }),
+            ("slit-monochromator", {
+                "label": "Det. slit",
+                "tooltip": "Opening size of the detector slit.\nThe wider, the larger the wavelength bandwidth.",
+            }),
             ("density", {  # from tc-od-filter
                 "tooltip": "Optical density",
             }),

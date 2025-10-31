@@ -743,6 +743,58 @@ class Sparc2AlignTab(Tab):
             else:
                 logging.warning("Fiber-aligner present, but found no detector affected by it.")
 
+        if "tc-align" in tab_data.align_mode.choices:
+            # The time-correlator should have (2) photo-detectors as children
+            tc_children = main_data.time_correlator.children.value
+            photods = sorted((c for c in tc_children if c.role.startswith("photo-detector")),
+                             key=lambda c: c.role)
+
+            if photods:
+                logging.debug("Using %s as first time-correlator detector", photods[0].name)
+                speccnts = acqstream.CameraCountStream("Intensity chronogram",
+                                               photods[0],
+                                               photods[0].data,
+                                               emitter=None,
+                                               detvas=get_local_vas(photods[0], main_data.hw_settings_config),
+                                               )
+                speccnt_spe = self._stream_controller.addStream(speccnts,  #FIXME: need separate viewport
+                                                                add_to_view=self.panel.vp_align_fiber.view)
+                # Special for the time-correlator: some of its settings also affect
+                # the photo-detectors.
+                if main_data.time_correlator:
+                    if model.hasVA(main_data.time_correlator, "syncDiv"):
+                        speccnt_spe.add_setting_entry("syncDiv",
+                                                      main_data.time_correlator.syncDiv,
+                                                      main_data.time_correlator,
+                                                      main_data.hw_settings_config["time-correlator"].get("syncDiv")
+                                                      )
+
+                if main_data.tc_od_filter:
+                    speccnt_spe.add_axis_entry("density", main_data.tc_od_filter)
+                    speccnt_spe.add_axis_entry("band", main_data.tc_filter)
+                speccnt_spe.stream_panel.flatten()
+                self._speccnt_stream = speccnts
+                speccnts.should_update.subscribe(self._on_ccd_stream_play)
+
+                if len(photods) > 1 and photods[0] in main_data.photo_ds and photods[1] in main_data.photo_ds:
+                    if self._fbdet2:
+                        # It's unlikely that both fiber-align and tc-align are used together, and
+                        # even more unlikely that both have a second detector.
+                        # So this is just to future-proof this code.
+                        logging.warning("Fiber-align mode already uses a second detector, "
+                                        "which is incompatible with the second detector of the time-correlator")
+                    self._fbdet2 = photods[1]
+                    _, self._det2_cnt_ctrl = speccnt_spe.stream_panel.add_text_field("Detector 2",
+                                                                                     "",
+                                                                                     readonly=True)
+                    self._det2_cnt_ctrl.SetForegroundColour("#FFFFFF")
+                    f = self._det2_cnt_ctrl.GetFont()
+                    f.PointSize = 12
+                    self._det2_cnt_ctrl.SetFont(f)
+                    speccnts.should_update.subscribe(self._on_fbdet1_should_update)
+            else:
+                logging.warning("Time-correlator present, but has no photo-detectors as children.")
+
         if main_data.light_aligner and not ("light_aligner", "z") in tab_data.axes:
             self.panel.btn_p_light_aligner_z.Show(False)
             self.panel.lbl_p_light_aligner_z.Show(False)
@@ -790,6 +842,7 @@ class Sparc2AlignTab(Tab):
             (panel.btn_align_centering, "center-align"),
             (panel.btn_align_ek, "ek-align"),
             (panel.btn_align_fiber, "fiber-align"),
+            (panel.btn_align_tc, "tc-align"),
             (panel.btn_align_streakcam, "streak-align"),
             (panel.btn_align_light_in, "light-in-align"),
             (panel.btn_align_light_in_ar, "light-in-align-ar"),
@@ -804,6 +857,7 @@ class Sparc2AlignTab(Tab):
             "center-align": "ar",
             "ek-align": "ek-align",
             "fiber-align": "fiber-align",
+            "tc-align": "fiber-align",
             "streak-align": "streak-align",
             "light-in-align": "light-in-align",
             "light-in-align-ar": "light-in-align",

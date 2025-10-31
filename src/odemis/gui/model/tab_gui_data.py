@@ -926,7 +926,7 @@ class Sparc2AlignGUIData(ActuatorGUIData):
         amodes = [
                   "lens-align", "mirror-align", "lens2-align", "center-align",
                   "ek-align", "streak-align", "fiber-align", "light-in-align",
-                  "tunnel-lens-align", # "tc-align" is added later if needed
+                  "tunnel-lens-align",
                  ]
 
         # VA for autofocus procedure mode
@@ -998,18 +998,12 @@ class Sparc2AlignGUIData(ActuatorGUIData):
         if main.fibaligner is None:
             amodes.remove("fiber-align")
 
-        # If there is a time-correlator, and it's not affected by the fiber aligner, then we need a
-        # dedicated mode.
-        if (main.time_correlator and
-            (main.fibaligner is None or main.time_correlator.name not in main.fibaligner.affects.value)
-        ):
-            amodes.append("tc-align")
-
         if main.streak_ccd is None:
             amodes.remove("streak-align")
 
         if main.light_aligner is None:
             amodes.remove("light-in-align")
+
         else:
             if main.spec_switch:
                 # Check that the spec-selector has the right metadata

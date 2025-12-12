@@ -245,7 +245,7 @@ SPARC2_MODES = {
                                    'z': "MD:" + model.MD_FAV_POS_ACTIVE},
                  # 'spec-selector' will depend on the affects
                 }),
-            'spec-focus': (r"ccd.*",  # TODO: only use "focus" as target?
+            'spec-focus': (r"cchttps://github.com/delmic/odemis/pull/3259d.*",  # TODO: only use "focus" as target?
                 {'lens-switch': {'x': ("MD:" + model.MD_FAV_POS_DEACTIVE, 'off')},
                  'lens-mover': {'x': "MD:" + model.MD_FAV_POS_ACTIVE},
                  'slit-in-big': {'x': 'off'},  # closed

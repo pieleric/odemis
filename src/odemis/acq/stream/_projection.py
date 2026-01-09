@@ -620,6 +620,7 @@ class ARPolarimetryProjection(ARProjection):
                 output_size = (400, 600)  # defines the resolution of the displayed image
 
                 for pol, raw in data_raw.items():
+                    logging.debug("Processing polarimetry raw image for ebeam pos %s and pol %s", ebeam_pos, pol)
 
                     # Correct image for background. It must match the polarization (defaulting to MD_POL_NONE).
                     calibrated = self._processBackground(raw, raw.metadata.get(model.MD_POL_MODE, model.MD_POL_NONE))
@@ -628,6 +629,7 @@ class ARPolarimetryProjection(ARProjection):
                     if numpy.prod(calibrated.shape) > (1280 * 1080):
                         calibrated = self._resizeImage(calibrated, size=1024)
 
+                    logging.debug("Calculating rectangular representation for ebeam pos %s and pol %s", ebeam_pos, pol)
                     # calculate the rectangular representation (phi/theta) of the background corrected raw images
                     calibrated_raw[pol] = angleres.AngleResolved2Rectangular(calibrated, output_size, hole=False)
 
@@ -679,6 +681,8 @@ class ARPolarimetryProjection(ARProjection):
             polarimetry_data = polarimetry_cache[ebeam_pos][pol_pos]
         else:
             try:
+                logging.debug("Updating polarimetry polar representation for ebeam pos %s and pol pos %s",
+                              ebeam_pos, pol_pos)
                 # Note: Takes 0.24 sec to convert one image for display and tested on an image of size (256, 1024)
                 # Create empty dict for processed ebeam position in cache
                 polarimetry_cache[ebeam_pos] = {}
@@ -735,6 +739,7 @@ class ARPolarimetryProjection(ARProjection):
         # TODO most likely on the histogram update, calc histogram in this class
 
         ebeam_pos = self.stream.point.value
+        logging.debug("updating ARPolarimetryProjection image for ebeam pos %s", ebeam_pos)
         try:
             if ebeam_pos == (None, None):
                 self.image.value = None

@@ -345,9 +345,12 @@ def AngleResolved2Rectangular(data, output_size, hole=True):
     # are contained in (triangle from delaunay triangulation).
     # Grid positions located outside of any delaunay triangle are set to NaN.
 
+    logging.debug("Computing the rect of data of shape %s", data.shape)
     # Note: delaunay triangulation input points: ndarray of floats, shape (numpoints, ndim) -> transpose data for input
     data_transposed = numpy.array([phi_data_masked, theta_data_masked]).T
     triang = DelaunayTriangulation(data_transposed)
+
+    logging.debug("Interpolating with output size %s", output_size)
     # create interpolation object
     interp = LinearNDInterpolator(triang, intensity_data_masked.flat)
     # create grid of positions for interpolation

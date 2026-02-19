@@ -79,17 +79,18 @@ class TestMeteorTFS3Move(unittest.TestCase):
         """Test switching between different postures and check that the 3D transformations work as expected"""
         f = self.pm.cryoSwitchSamplePosition(SEM_IMAGING)
         f.result()
-
+        time.sleep(0.1)  # Wait to enure the posture is updated
         self.assertEqual(self.pm.current_posture.value, SEM_IMAGING)
 
         if model.MD_FAV_MILL_POS_ACTIVE in self.stage_md:
             f = self.pm.cryoSwitchSamplePosition(MILLING)
             f.result()
+            time.sleep(0.1)  # Wait to enure the posture is updated
             self.assertEqual(self.pm.current_posture.value, MILLING)
 
         f = self.pm.cryoSwitchSamplePosition(FM_IMAGING)
         f.result()
-
+        time.sleep(0.1)  # Wait to enure the posture is updated
         self.assertEqual(self.pm.current_posture.value, FM_IMAGING)
 
     def test_to_posture(self):

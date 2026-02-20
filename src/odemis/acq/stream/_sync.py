@@ -426,7 +426,7 @@ class MultipleDetectorStream(Stream, metaclass=ABCMeta):
 
         # Wait for the thread to be complete (and hardware state restored)
         self._acq_done.wait(5)
-        return True
+        return False  # Trick to not report it as "cancelled" so the future will return the result (data + exception) instead of raising CancelledError
 
     def _check_cancelled(self):
         if self._acq_state == CANCELLED:
@@ -1552,6 +1552,7 @@ class SEMMDStream(MultipleDetectorStream):
                 # Acquire the maximum amount of pixels until next leech, and less than the live period
                 n_y, n_x = self._get_next_rectangle(rep, spots_sum, px_time, leech_np)
                 npixels2scan = n_x * n_y
+                logging.debug("Acquiring %s pixels, starting at pixel index %s", npixels2scan, spots_sum)
 
                 px_idx = (spots_sum // rep[0], spots_sum % rep[0])  # current pixel index
                 acq_rect = (px_idx[1], px_idx[0], px_idx[1] + n_x - 1, px_idx[0] + n_y - 1)
@@ -1605,6 +1606,7 @@ class SEMMDStream(MultipleDetectorStream):
                 # and now the acquisition
                 for ce in self._acq_complete:
                     ce.clear()
+                self._check_cancelled()
 
                 self._df0.synchronizedOn(self._trigger)
                 for s, sub in zip(self._streams, self._subscribers):
@@ -1707,6 +1709,7 @@ class SEMMDStream(MultipleDetectorStream):
                 self._anchor_raw.append(self._assembleAnchorData(self._dc_estimator.raw))
 
         except Exception as exp:
+            logging.exception("Got exception")
             if not isinstance(exp, CancelledError):
                 logging.exception("Scanner sync acquisition of multiple detectors failed")
 
@@ -1716,11 +1719,8 @@ class SEMMDStream(MultipleDetectorStream):
             self._df0.synchronizedOn(None)
 
             if not isinstance(exp, CancelledError) and self._acq_state == CANCELLED:
-                # Reset data in case it was cancelled very late, to regain memory
-                self._raw = []
-                self._anchor_raw = []
                 logging.warning("Converting exception to cancellation")
-                raise CancelledError()
+                exp = CancelledError()
 
             # If it wasn't finalized yet, finalize the data
             if not self._raw:
@@ -1736,8 +1736,11 @@ class SEMMDStream(MultipleDetectorStream):
 
             if not self._raw:
                 # No data -> just make it look like a "complete" exception
+                logging.debug("No data acquired, raising exception")
                 raise exp
 
+            logging.debug("Raising exception %s", exp)
+            raise exp #DEBUG
             error = exp
         finally:
             self._current_scan_area = None  # Indicate we are done for the live (also in case of error)
@@ -1752,6 +1755,7 @@ class SEMMDStream(MultipleDetectorStream):
             self._current_future = None
             self._acq_done.set()
 
+        logging.debug("Acquisition finished with error = %s", error)
         return self.raw, error
 
     def _runAcquisitionVector(self, future) -> Tuple[List[model.DataArray], Optional[Exception]]:
@@ -1971,11 +1975,8 @@ class SEMMDStream(MultipleDetectorStream):
             self._df0.synchronizedOn(None)
 
             if not isinstance(exp, CancelledError) and self._acq_state == CANCELLED:
-                # Reset data in case it was cancelled very late, to regain memory
-                self._raw = []
-                self._anchor_raw = []
                 logging.warning("Converting exception to cancellation")
-                raise CancelledError()
+                exp = CancelledError()
 
             # If it wasn't finalized yet, finalize the data
             if not self._raw:

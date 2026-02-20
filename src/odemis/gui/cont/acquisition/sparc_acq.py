@@ -488,10 +488,13 @@ class SparcAcquiController(object):
         data, exp = acq_future.result()
 
         filename = self.filename.value
-        # If it only contains part of the full acquisition, due to a failure, change the name to highlight it
+        # If it only contains part of the full acquisition, due to a failure or cancellation, change the name to highlight it
         if exp:
             fn_root, ext = splitext(filename)
-            filename = f"{fn_root}-failed{ext}"
+            if isinstance(exp, CancelledError):
+                filename = f"{fn_root}-cancelled{ext}"
+            else:
+                filename = f"{fn_root}-failed{ext}"
             # TODO: if *only* survey: don't report partial failure, but complete failure.
 
         if data:
@@ -517,7 +520,6 @@ class SparcAcquiController(object):
         try:
             data, exp = future.result()
         except CancelledError:
-            # hide progress bar (+ put pack estimated time)
             self.gauge_acq.Hide()
             # don't change filename => we can reuse it
             self._reset_acquisition_gui(keep_filename=True)
@@ -532,8 +534,26 @@ class SparcAcquiController(object):
 
         # Handle the case acquisition failed "a bit"
         if exp:
-            logging.error("Acquisition partially failed (%d streams will still be saved): %s",
-                          len(data), exp)
+            if isinstance(exp, CancelledError):
+                # If some data was acquired before the cancellation, offer to save it
+                logging.info("Acquisition cancelled after some data was acquired (%d datasets)", len(data))
+                dlg_result = wx.MessageBox(
+                    "The acquisition was cancelled, but some data was already acquired.\n"
+                    "Do you want to save the partially acquired data?",
+                    "Acquisition cancelled",
+                    wx.YES_NO | wx.ICON_QUESTION
+                )
+                if dlg_result != wx.YES:
+                    # Don't save the data => do the same as cancelled without data
+                    self.gauge_acq.Hide()
+                    # don't change filename => we can reuse it
+                    self._reset_acquisition_gui(keep_filename=True)
+                    return
+                else:
+                    logging.info("Acquisition cancelled, but user chose to save the partially acquired data")
+            else:
+                logging.error("Acquisition partially failed (%d streams will still be saved): %s",
+                              len(data), exp)
 
         #  REMOVE the overlay (live_update) in the SEM window which displays the SEM measurements of the current
         #  acquisition if a  stream is added and acquisition is started.
@@ -550,8 +570,7 @@ class SparcAcquiController(object):
     @call_in_wx_main
     def on_file_export_done(self, future):
         """
-        Callback called when the acquisition is finished (either successfully or
-        cancelled)
+        Callback called when the acquisition is finished (either successfully or cancelled)
         """
         # hide progress bar
         self.gauge_acq.Hide()
@@ -574,6 +593,12 @@ class SparcAcquiController(object):
 
             # display in the analysis tab
             self._show_acquisition(data, open(filename))
+        elif isinstance(exp, CancelledError):
+            # Same behaviour as if cancelled with no data
+            self.gauge_acq.Hide()
+            self._reset_acquisition_gui("Acquisition cancelled, partial data saved.",
+                                        level=logging.INFO,
+                                        keep_filename=True)
         else:
             # TODO: open the data in the analysis tab... but don't switch
             self._reset_acquisition_gui("Acquisition failed (see log panel), partial data saved.",

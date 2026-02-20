@@ -940,6 +940,10 @@ def bindFuture(future, fn, args=(), kwargs=None):
         result = fn(*args, **kwargs)
     except CancelledError:
         # cancelled via the future (while running) => it's all already handled
+        logging.debug("Task cancelled while running")  #DEBUG
+        if not future.cancelled():
+            e, tb = sys.exc_info()[1:]
+            future.set_exception_info(e, tb)
         pass
     except BaseException:
         e, tb = sys.exc_info()[1:]

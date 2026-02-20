@@ -596,15 +596,17 @@ class AcquisitionTask(object):
                     # No leeches
                     pass
 
-        except CancelledError:
-            raise
         except Exception as ex:
             # If no acquisition yet => just raise the exception,
             # otherwise, the results we got might already be useful
             if not raw_images:
+                logging.debug("No data acquired yet, raising the exception", exc_info=True)  #DEBUG
                 raise
-            logging.warning("Exception during acquisition (after some data already acquired)",
-                            exc_info=True)
+            if isinstance(ex, CancelledError):
+                logging.info("Acquisition cancelled after some data was already acquired")
+            else:
+                logging.warning("Exception during acquisition (after some data already acquired)",
+                                exc_info=True)
             exp = ex
         finally:
             # Don't hold references to the streams once it's over

@@ -190,9 +190,7 @@ class CorrelationPointsController:
             self.txt_refinez_active.SetLabel("Super Z information in use")
             self.refinez_active = False
 
-
-        self.delete_btn = self._panel.btn_delete_row
-        self.delete_btn.Bind(wx.EVT_BUTTON, self._on_delete_row)
+        self._panel.btn_delete_row.Bind(wx.EVT_BUTTON, self._on_delete_row)
 
         # Bind the event for cell selection
         self.grid.Bind(wx.grid.EVT_GRID_SELECT_CELL, self._on_cell_selected)
@@ -528,34 +526,33 @@ class CorrelationPointsController:
         Deletes the currently selected row and clear the current target VA. Updates the correlation target based on the
         latest changes.
         """
-        if not self._tab_data_model.main.currentTarget.value:
+        target = self._tab_data_model.main.currentTarget.value
+        if not target:
             self.grid.ClearSelection()
             return
 
-        selected_rows = self.grid.GetSelectedRows()
-        # The grid contains only FIB and FM fiducials and POIs.
-        # So if the current target is of these types, delete from the grid.
-        # Otherwise, it is a surface fiducial which is not present in the grid.
-        # Check the type of the current target and delete accordingly.
-        if selected_rows:
-            for row in selected_rows:
-                self.grid.DeleteRows(pos=row, numRows=1, updateLabels=True)
-
-                for target in self._tab_data_model.main.targets.value:
-                    if target.name.value == self._tab_data_model.main.currentTarget.value.name.value:
-                        logging.debug(f"Deleting target: {target.name.value}")
-                        self._tab_data_model.main.targets.value.remove(target)
-                        self.z_targeting_btn.Enable(False)
-                        self._tab_data_model.main.currentTarget.value = None
+        # A surface fiducial is not present in the grid, so special case to just remove it from the targets
+        if target.type.value == TargetType.SurfaceFiducial:
+            logging.debug("Deleting Surface Fiducial")
+            try:
+                self._tab_data_model.main.targets.value.remove(target)
+            except ValueError:
+                logging.warning("Target surface fiducial %s not found in the targets list.", target.name.value)
+            self._tab_data_model.main.currentTarget.value = None
+        else:
+            # Find the row which contains the current target, and delete both the row and the target itself
+            for row in range(self.grid.GetNumberRows()):
+                if self._selected_target_in_grid(target, row):
+                    logging.debug(f"Deleting target: {target.name.value}")
+                    # Disconnect as it gets called with odd values when DeleteRows() is run
+                    self.grid.Unbind(wx.grid.EVT_GRID_SELECT_CELL, handler=self._on_cell_selected)
+                    try:
+                        self.grid.DeleteRows(pos=row, numRows=1, updateLabels=True)
                         self.grid.ClearSelection()
-                        break
-
-        elif TargetType.SurfaceFiducial == self._tab_data_model.main.currentTarget.value.type.value:
-            for target in self._tab_data_model.main.targets.value:
-                if TargetType.SurfaceFiducial == target.type.value:
-                    logging.debug("Deleting Surface Fiducial")
-                    self._tab_data_model.main.targets.value.remove(target)
-                    self._tab_data_model.main.currentTarget.value = None
+                        self._tab_data_model.main.targets.value.remove(target)
+                        self._tab_data_model.main.currentTarget.value = None
+                    finally:
+                        self.grid.Bind(wx.grid.EVT_GRID_SELECT_CELL, self._on_cell_selected)
                     break
 
         self.correlation_target = update_feature_correlation_target(self.correlation_target, self._tab_data_model)
@@ -574,7 +571,12 @@ class CorrelationPointsController:
             vp.canvas.update_drawing()
 
         # highlight the selected row
-        self.grid.SelectRow(event.GetRow())
+        # FIXME: when deleting, this event called back, the number of rows is always 1?! => that's why we now use a unbind
+        logging.debug(f"Selected row: {row}, total rows: {self.grid.GetNumberRows()}")
+        if row < self.grid.GetNumberRows():
+            self.grid.SelectRow(row)
+        else:
+            logging.warning("Selected row index %s is out of range %s of the grid rows.", row, self.grid.GetNumberRows())
         event.Skip()
 
     def _selected_target_in_grid(self, target: Target, row: int) -> bool:
@@ -697,7 +699,7 @@ class CorrelationPointsController:
         if not target:
             self.grid.ClearSelection()
             self.z_targeting_btn.Enable(False)
-            return None
+            return
 
         mip_enabled = any([stream.max_projection.value for stream in self.correlation_target.fm_streams])
 
@@ -708,6 +710,7 @@ class CorrelationPointsController:
             else:
                 self.z_targeting_btn.Enable(True)
                 if mip_enabled:
+                    # FIXME: why re-runing Z-targeting everytime the current target changes?
                     self._on_z_targeting(None)
 
         for row in range(self.grid.GetNumberRows()):

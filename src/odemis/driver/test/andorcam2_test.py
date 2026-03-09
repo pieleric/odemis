@@ -178,6 +178,7 @@ class TestAndorCam2HwTrigger(unittest.TestCase):
 
         self.camera.data.synchronizedOn(None)
 
+
     def test_trigger_continuous(self):
         """
         Configure hw trigger, and check we receive images with .subscribe()
@@ -195,6 +196,52 @@ class TestAndorCam2HwTrigger(unittest.TestCase):
         # TODO: do full vertical binning (in another test), for shorter readout
         # binning = (1, self.camera.binning.range[1][1])
         binning = self.camera.binning.range[0]
+        self.camera.binning.value = binning
+        self.camera.dropOldFrames.value = False
+        self.camera.data.synchronizedOn(self.camera.hardwareTrigger)
+
+        self.left = number
+
+        start = time.time()
+        timeout = start + number * trigger_period * 1.3 + 1
+        # Acquire, and wait until everything is received (or waited long enough)
+        self.camera.data.subscribe(self.receive_image)
+
+        # Check frame_period is shorter than the trigger, otherwise some triggers
+        # will be missed.
+        time.sleep(0.1)
+        self.assertGreater(trigger_period, self.camera.frameDuration.value)
+
+        while self.left > 0:
+            time.sleep(exp / 10)
+            if time.time() > timeout:
+                self.fail(f"Still {self.left} images to acquire after {time.time() - start} s")
+
+        print(f"Images acquired at: {self.acq_dates}")
+        print(f"Images received at: {self.rcv_dates}")
+        rcv_diff = [b - a for a, b in zip(self.rcv_dates[:-1], self.rcv_dates[1:])]
+        print(f"Images received diff: {rcv_diff}")
+        self.assertEqual(len(self.acq_dates), number)
+        self.assertEqual(self.left, 0)
+
+        self.camera.data.synchronizedOn(None)
+
+    def test_trigger_2frames(self):
+        """
+        Configure hw trigger, and check we receive images with .subscribe()
+
+        Note: on a real hardware, the camera trigger should receive triggers
+        regularly (ex: 10Hz)
+        """
+        exp = 0.01  # s
+        number = 100  # number of frames to acquire
+
+        # Expected trigger period, it must be longer than the "accumulate" time
+        trigger_period = 0.2  # s
+
+        self.camera.exposureTime.value = exp  # s
+        binning = self.camera.binning.range[0]
+        self.camera.useDoubleFrames.value = True
         self.camera.binning.value = binning
         self.camera.dropOldFrames.value = False
         self.camera.data.synchronizedOn(self.camera.hardwareTrigger)

@@ -3868,6 +3868,16 @@ class SEMCCDAcquirerHwSync(SEMCCDAcquirer):
         # Return None for the SEM data as it's received all at once at the end
         ret_das = [None for _ in self._mdstream._streams[:-1]]
 
+        #DEBUG: for testing a force cleaning cycle before acquiring the actual frame
+        if hasattr(self._mdstream._ccd, "useDoubleFrame") and self._mdstream._ccd.useDoubleFrame.value:
+            # Wait for the first frame and immediately discard it, to "clean" the CCD
+            timeout = self.snapshot_time * 3 + 5
+            try:
+                ccd_data = self._mdstream._acq_data_queue[self._mdstream._ccd_idx].get(timeout=timeout)
+            except queue.Empty:
+                raise TimeoutError(f"Timeout while waiting for CCD data after {timeout} s")
+            self._mdstream._check_cancelled()
+
         # Wait for one CCD image to arrive
         timeout = self.snapshot_time * 3 + 5
         try:

@@ -57,6 +57,8 @@ TRIG_HW = 3  # Use TTL signal received by the camera (for every frame)
 # How many times the garbage collector can be skip
 MAX_GC_SKIP = 10
 
+# DEBUG mode to force 2 frames via kinetics mode when using hardware trigger
+HW_TRIGGER_IS_2_FRAMES = True
 
 class TerminationRequested(Exception):
     """
@@ -868,6 +870,10 @@ class AndorCam2(model.DigitalCamera):
                 # TODO: check the detection works properly when remote. Possibly we could
                 # extend Event() to support a constant in order to make events more distinguishable from each other.
                 self.hardwareTrigger = model.HwTrigger()
+
+                if HW_TRIGGER_IS_2_FRAMES:
+                    self.useDoubleFrames = model.BooleanVA(True)
+
             else:
                 logging.info("Camera does not support external trigger")
 
@@ -2005,13 +2011,21 @@ class AndorCam2(model.DigitalCamera):
             self.atcore.SetAcquisitionMode(AndorV2DLL.AM_VIDEO)
             self.atcore.SetTriggerMode(AndorV2DLL.TM_INTERNAL)  # no trigger
         elif trigger_mode == TRIG_HW:
-            logging.debug("Using HW trigger for acquisition")
-            self.atcore.SetAcquisitionMode(AndorV2DLL.AM_VIDEO)
-            self.atcore.SetTriggerMode(AndorV2DLL.TM_EXTERNAL)
-            # FastExtTrigger allows to have a shorter frame duration, but at the expense of
-            # potentially incorrect data, because the clean cycle might not have occurred. It also
-            # causes the reported frame duration to be much shorter. For our case, it doesn't help.
-            # self.atcore.SetFastExtTrigger(0)  # Disabled (default)
+            if HW_TRIGGER_IS_2_FRAMES and self.useDoubleFrames.value:
+                logging.debug("Using HW trigger for acquisition + 2 frames")
+                self.atcore.SetAcquisitionMode(AndorV2DLL.AM_KINETIC)
+                self.atcore.SetTriggerMode(AndorV2DLL.TM_EXTERNAL)
+                if not self.IsTriggerModeAvailable(AndorV2DLL.TM_EXTERNAL):
+                    logging.warning("External trigger mode not supported with current settings")
+            else:
+
+                logging.debug("Using HW trigger for acquisition")
+                self.atcore.SetAcquisitionMode(AndorV2DLL.AM_VIDEO)
+                self.atcore.SetTriggerMode(AndorV2DLL.TM_EXTERNAL)
+                # FastExtTrigger allows to have a shorter frame duration, but at the expense of
+                # potentially incorrect data, because the clean cycle might not have occurred. It also
+                # causes the reported frame duration to be much shorter. For our case, it doesn't help.
+                # self.atcore.SetFastExtTrigger(0)  # Disabled (default)
         elif trigger_mode == TRIG_SW:
             logging.debug("Using sw trigger for synchronized acquisition")
             # Note: this increases the frame duration by ~7ms
@@ -2176,6 +2190,12 @@ class AndorCam2(model.DigitalCamera):
 
         # Exposure time should always be reset (after changing the acquisition mode)
         self.atcore.SetExposureTime(c_float(self._exposure_time))
+
+        if HW_TRIGGER_IS_2_FRAMES and trigger_mode == TRIG_HW and self.useDoubleFrames.value:
+            # SetNumberAccumulations(1) = default => no need
+            self.atcore.SetNumberKinetics(c_int32(2))
+            self.atcore.SetKineticCycleTime(c_float(0.0))  # will be the shortest value possible
+
         # Read actual value
         exposure, accumulate, kinetic = self.GetAcquisitionTimings()
         self._metadata[model.MD_EXP_TIME] = exposure
@@ -2957,6 +2977,7 @@ class FakeAndorV2DLL(object):
 
         self.exposure = 0.1 # s
         self.kinetic = 0. # s, kinetic cycle time
+        self.number_kinetics = 1
         self.hsspeed = 0 # index in pixelReadout
         self.vsspeed = 0  # index in vertReadouts
         self.pixelReadouts = [0.01e-6, 0.1e-6] # s, time to readout one pixel
@@ -3308,6 +3329,9 @@ class FakeAndorV2DLL(object):
     def SetKineticCycleTime(self, t):
         self.kinetic = _val(t)
 
+    def SetNumberKinetics(self, number):
+        self.number_kinetics = _val(number)
+
     def SetExposureTime(self, t):
         self.exposure = _val(t)
 
@@ -3387,6 +3411,8 @@ class FakeAndorV2DLL(object):
             self._last_frame += 1
             if self.acqmode == 1: # Single scan
                 self.AbortAcquisition()
+            elif self.acqmode == 3:  # Kinetic
+                self._begin_exposure()
             elif self.acqmode == 5: # Run till abort
                 self._begin_exposure()
             else:

@@ -856,13 +856,18 @@ class RGBSpatialProjection(RGBProjection):
             md = raw.metadata
             # get the pixel size of the full image
             ps = md[model.MD_PIXEL_SIZE]
-            max_mpp = ps[0] * (2 ** raw.maxzoom)
+            # max_mpp = float(ps[0]) * (2 ** raw.maxzoom)
+            max_mpp = ps[0] * (2 ** raw.maxzoom)  # DEBUG
             # sets the mpp as the X axis of the pixel size of the full image
             mpp_rng = (ps[0], max_mpp)
             self.mpp = model.FloatContinuous(max_mpp, mpp_rng, setter=self._set_mpp)
             full_rect = img.getBoundingBox(raw)
             minx, miny, maxx, maxy = full_rect
             rect_range = ((minx, miny, minx, miny), (maxx, maxy, maxx, maxy))
+            if not isinstance(full_rect[0], float):  # a numpy.float64?!
+                # Need to find out in which cases do we get non-float values, to be certain we fix it properly.
+                logging.error("Bounding box coordinates of %s are %s. pxs: %s", stream, type(full_rect[0]), type(ps))
+
             self.rect = model.TupleContinuous(full_rect, rect_range)
             self.rect.clip_on_range = True
             self.mpp.subscribe(self._onMpp)

@@ -1122,7 +1122,7 @@ def rotate_img_metadata(image, rotation, center_of_rot):
     return img
 
 
-def getBoundingBox(content):
+def getBoundingBox(content: model.DataArray) -> Tuple[float, float, float, float]:
     """
     Compute the physical bounding-box of the given DataArray(Shadow)
     content (DataArray(Shadow)): The data of the image
@@ -1146,6 +1146,8 @@ def getBoundingBox(content):
     dims = md.get(model.MD_DIMS, "CTZYX"[-content.ndim::])
     img_shape = (content.shape[dims.index('X')], content.shape[dims.index('Y')])
     # half shape on world coordinates
+    # Force pxs to float, in case it's a numpy scalar, to make sure we always return floats
+    # half_shape_wc = (img_shape[0] * float(pxs[0]) / 2, img_shape[1] * float(pxs[1]) / 2)  #DEBUG
     half_shape_wc = (img_shape[0] * pxs[0] / 2, img_shape[1] * pxs[1] / 2)
 
     md_pos = md.get(model.MD_POS, (0.0, 0.0))  # center

@@ -958,7 +958,11 @@ class BitmapCanvas(BufferedCanvas):
             im_last = images[-1]
             if isinstance(im_last, tuple):
                 im_last = im_last[0][0]  # first tile
-            bm_last = im_last.metadata["blend_mode"]
+            try:
+                bm_last = im_last.metadata["blend_mode"]
+            except KeyError:
+                logging.error("No blend mode in metadata: %s", im_last.metadata)
+                raise
 
             for i, im in enumerate(images):
                 if isinstance(im, tuple):

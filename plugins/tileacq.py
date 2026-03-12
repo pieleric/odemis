@@ -54,7 +54,7 @@ import wx
 
 class TileAcqPlugin(Plugin):
     name = "Tile acquisition"
-    __version__ = "1.8"
+    __version__ = "1.9"
     __author__ = "Éric Piel, Philip Winkler"
     __license__ = "GPLv2"
 
@@ -508,16 +508,38 @@ class TileAcqPlugin(Plugin):
             m["y"] = orig_pos["y"] - idx[1] * tile_size[1] * overlap
 
         logging.debug("Moving to tile %s at %s m", idx, m)
-        f = self.main_app.main_data.stage.moveAbs(m)
-        try:
-            speed = 10e-6  # m/s. Assume very low speed for timeout.
-            t = math.hypot(tile_size[0] * overlap, tile_size[1] * overlap) / speed + 1
-            # add 1 to make sure it doesn't time out in case of a very small move
-            f.result(t)
-        except TimeoutError:
-            logging.warning("Failed to move to tile %s", idx)
-            self.ft.running_subf.cancel()
-            # Continue acquiring anyway... maybe it has moved somewhere near
+
+        speed = 10e-6  # m/s. Assume very low speed for timeout.
+        # add 1s to make sure it doesn't time out in case of a very small move
+        timeout = math.hypot(tile_size[0] * overlap, tile_size[1] * overlap) / speed + 1
+        for i in range(3):  # Retry up to 3 times
+            f = self.main_app.main_data.stage.moveAbs(m)
+            try:
+                f.result(timeout)
+            except ValueError:  # Typically, asked to move to the wrong place, let's give up
+                raise
+            except CancelledError:
+                logging.warning("Move to tile %s cancelled", idx)
+                raise
+            except TimeoutError:  # Took too long -> stop and retry
+                logging.warning("Failed to move to tile %s", idx)
+                self.ft.running_subf.cancel()
+                # retry
+                continue
+            except Exception as ex:
+                time.sleep(0.1)
+                pos = self.main_app.main_data.stage.position.value
+                pos_xy = (pos["x"], pos["y"])
+                logging.warning("Failed to move to tile %s, now at %s: %s%s",
+                                idx, pos_xy, ex, ", will retry" if i < 2 else "")
+                continue
+
+            # The moved finished successfully, just stop trying to move, we are done!
+            break
+        else:
+            # We exhausted all retries, we failed to move to the tile, so we cancel the acquisition
+            logging.error("Failed to move to tile %s after 3 trials", idx)
+            raise OSError(f"Failed to move to tile {idx} after 3 trials")
 
     def _get_fov(self, sd):
         """

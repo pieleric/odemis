@@ -234,6 +234,13 @@ class CryoAcquiController(object):
         )
         self._panel.btn_tdct.Enable(tdct_available)
 
+    def _on_feature_streams_change(self, streams: list) -> None:
+        """
+        Called when the current feature's streams list changes internally.
+        """
+        if self.acqui_mode is guimod.AcquiMode.FIBSEM:
+            self._check_correlation_controls(self._current_feature)
+
     @call_in_wx_main
     def _on_feature_streams_change(self, streams: list) -> None:
         """

@@ -227,7 +227,9 @@ class Static2DStreamBase(StaticStream):
             except KeyError:
                 raise ValueError("Pixel size or position are missing from metadata")
             # Define a z-index
-            self.zIndex = model.IntContinuous(0, (0, raw[0].shape[0] - 1))
+            max_z = raw[0].shape[0] - 1
+            mid_z = max_z // 2  # z-stacks are often centered on the "interesting part", so start at the middle
+            self.zIndex = model.IntContinuous(mid_z, (0, max_z))
             self.zIndex.subscribe(self._on_zIndex)
 
             # option to see all z-levels at the same time using a maximum intensity projection (MIP)

@@ -465,7 +465,15 @@ class CryoLocalizationGUIData(CryoGUIData):
                 limits.append(zcentre + s.zIndex.range[1] * zstep / 2)
 
         if len(limits) > 1:
-            self.zPos.range = (min(limits), max(limits))
+            zrng = (min(limits), max(limits))
+            if not zrng[0] <= self.zPos.value <= zrng[1] or self.zPos.range == (0, 0):
+                # Completely new position => pick the middle as typically that's where the most interesting part is
+                new_z_pos = (zrng[0] + zrng[1]) / 2
+            else:
+                new_z_pos = None
+            self.zPos.range = zrng
+            if new_z_pos is not None:
+                self.zPos.value = new_z_pos
             logging.debug("Z stack display range updated to %f - %f, ZPos: %f",
                           self.zPos.range[0], self.zPos.range[1], self.zPos.value)
         else:
@@ -706,7 +714,15 @@ class AnalysisGUIData(MicroscopyGUIData):
                 limits.append(zcentre + s.zIndex.range[1] * zstep / 2)
 
         if len(limits) > 1:
-            self.zPos.range = (min(limits), max(limits))
+            zrng = (min(limits), max(limits))
+            if not zrng[0] <= self.zPos.value <= zrng[1] or self.zPos.range == (0, 0):
+                # Completely new position => pick the middle as typically that's where the most interesting part is
+                new_z_pos = (zrng[0] + zrng[1]) / 2
+            else:
+                new_z_pos = None
+            self.zPos.range = zrng
+            if new_z_pos is not None:
+                self.zPos.value = new_z_pos
             logging.debug("Z stack display range updated to %f - %f, ZPos: %f",
                           self.zPos.range[0], self.zPos.range[1], self.zPos.value)
         else:

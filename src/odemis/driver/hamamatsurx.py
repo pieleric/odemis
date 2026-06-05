@@ -26,7 +26,7 @@ import queue
 import socket
 import time
 import re
-from typing import Tuple, Optional, Dict, Callable
+from typing import Tuple, Optional, Dict, Callable, List
 
 import numpy
 
@@ -1397,7 +1397,7 @@ class StreakCamera(model.HwComponent):
 
         super().terminate()
 
-    def sendCommand(self, func, *args, **kwargs):
+    def sendCommand(self, func, *args, **kwargs) -> List[str]:
         """
         Sends a command to RemoteEx.
         :param func: (str) command or function, which should be send to RemoteEx
@@ -1670,11 +1670,25 @@ class StreakCamera(model.HwComponent):
         :returns: Label, Current value, Param type (PARAM_TYPE_DISPLAY)"""
         return self.sendCommand("MainParamInfoEx", parameter)
 
-    def MainParamsList(self):
+    def MainParamsList(self) -> List[str]:
         """Returns a list of all parameters related to main window.
         This command can be used to build up a complete parameter list related to main window at runtime.
-        :returns: NumberOfParameters,Parameter1,..., ParameterN"""
-        return self.sendCommand("MainParamsList")
+        :return: list of main window parameter names
+        """
+        result = self.sendCommand("MainParamsList")
+        if not result:
+            logging.warning("MainParamsList returned empty result.")
+            return []
+        try:
+            expected_count = int(result[0])
+        except (ValueError, IndexError):
+            logging.warning("MainParamsList returned unexpected format: %s", result)
+            return result
+        params = result[1:]
+        if len(params) != expected_count:
+            logging.warning("MainParamsList reported %d parameters but received %d",
+                            expected_count, len(params))
+        return params
 
     def MainSyncGet(self):
         """Returns the setting of the sync parameter which is available on the HPD-TA main window.
@@ -1744,10 +1758,24 @@ class StreakCamera(model.HwComponent):
             raise IOError("Failed to decode response from GenParamInfo: %s" % ex)
         return label, value, param_typ
 
-    def GenParamsList(self):
+    def GenParamsList(self) -> List[str]:
         """Returns a list of all parameters related to the general options.
-        :returns: NumberOfParameters,Parameter1,..., ParameterN."""
-        return self.sendCommand("GenParamsList")
+        :return: list of general option parameter names
+        """
+        result = self.sendCommand("GenParamsList")
+        if not result:
+            logging.warning("GenParamsList returned empty result.")
+            return []
+        try:
+            expected_count = int(result[0])
+        except (ValueError, IndexError):
+            logging.warning("GenParamsList returned unexpected format: %s", result)
+            return result
+        params = result[1:]
+        if len(params) != expected_count:
+            logging.warning("GenParamsList reported %d parameters but received %d",
+                            expected_count, len(params))
+        return params
 
     # === Acquisition commands ========================================================
 
@@ -1804,7 +1832,7 @@ class StreakCamera(model.HwComponent):
             """
         return self.sendCommand("AcqParamInfo", parameter)
 
-    def AcqParamInfoEx(self, parameter):
+    def AcqParamInfoEx(self, parameter: str) -> List[str]:
         """Returns information about the specified parameter. Returns more detailed information in case of a list
         parameter (Parameter type = 2) than AcqParamInfo. In case of a numeric parameter (Parameter
         type = 1) it additionally returns the step width
@@ -1815,14 +1843,28 @@ class StreakCamera(model.HwComponent):
         Note: In case of a list or an exposure time the number of entries and all list entries are returned in
         the response of the AcqParamInfoEx command. In case of a numeric parameter (Parameter type =
         1) it additionally returns the step width
-            """
+        """
         return self.sendCommand("AcqParamInfoEx", parameter)
 
-    def AcqParamsList(self):
+    def AcqParamsList(self) -> List[str]:
         """Returns a list of all parameters related to acquisition. This command can be used to build up
-         a complete parameter list related to acquisition at runtime.
-        :return: NumberOfParameters,Parameter1,..., ParameterN"""
-        return self.sendCommand("AcqParamsList")
+        a complete parameter list related to acquisition at runtime.
+        :return: list of acquisition parameter names
+        """
+        result = self.sendCommand("AcqParamsList")
+        if not result:
+            logging.warning("AcqParamsList returned empty result.")
+            return []
+        try:
+            expected_count = int(result[0])
+        except (ValueError, IndexError):
+            logging.warning("AcqParamsList returned unexpected format: %s", result)
+            return result
+        params = result[1:]
+        if len(params) != expected_count:
+            logging.warning("AcqParamsList reported %d parameters but received %d",
+                            expected_count, len(params))
+        return params
 
     def AcqLiveMonitor(self, monitorType, nbBuffers=None, *args):
         """Starts a mode which returns information on every new image acquired in live mode.
@@ -1892,7 +1934,7 @@ class StreakCamera(model.HwComponent):
 
     # === Camera commands ========================================================
 
-    def CamParamGet(self, location, parameter):
+    def CamParamGet(self, location: str, parameter: str) -> List[str]:
         """Returns the values of the camera options.
         :param location: (str)
                     Setup: Parameters on the options dialog.
@@ -2100,12 +2142,26 @@ class StreakCamera(model.HwComponent):
                 PARAM_TYPE_STRING, PARAM_TYPE_EXPTIME, PARAM_TYPE_DISPLAY"""
         return self.sendCommand("CamParamInfoEx", location, parameter)
 
-    def CamParamsList(self, location):
+    def CamParamsList(self, location: str) -> List[str]:
         """Returns a list of all camera parameters of the specified location.
         This command can be used to build up a complete parameter list for the corresponding camera at runtime.
-        :param location: (str) see CamParamGet
-        :return: NumberOfParameters,Parameter1,..., ParameterN"""
-        return self.sendCommand("CamParamsList", location)
+        :param location: see CamParamGet
+        :return: list of parameter names for the given location
+        """
+        result = self.sendCommand("CamParamsList", location)
+        if not result:
+            logging.warning("CamParamsList returned empty result.")
+            return []
+        try:
+            expected_count = int(result[0])
+        except (ValueError, IndexError):
+            logging.warning("CamParamsList returned unexpected format: %s", result)
+            return result
+        params = result[1:]
+        if len(params) != expected_count:
+            logging.warning("CamParamsList(%s) reported %d parameters but received %d",
+                            location, expected_count, len(params))
+        return params
 
     def CamGetLiveBG(self):
         """Gets a new background image which is used for real time background subtraction (RTBS).
@@ -2183,11 +2239,25 @@ class StreakCamera(model.HwComponent):
             param type: PARAM_TYPE_NUMERIC, PARAM_TYPE_LIST"""
         return self.sendCommand("DevParamInfoEx", location, parameter)
 
-    def DevParamsList(self, device):
+    def DevParamsList(self, device: str) -> List[str]:
         """Return list of all parameters of a specified device.
-        :param device: (str) see location in DevParamGet
-        :return: number of parameters, parameters"""
-        return self.sendCommand("DevParamsList", device)
+        :param device: see location in DevParamGet
+        :return: list of parameter names for the given device
+        """
+        result = self.sendCommand("DevParamsList", device)
+        if not result:
+            logging.warning("DevParamsList returned empty result.")
+            return []
+        try:
+            expected_count = int(result[0])
+        except (ValueError, IndexError):
+            logging.warning("DevParamsList returned unexpected format: %s", result)
+            return result
+        params = result[1:]
+        if len(params) != expected_count:
+            logging.warning("DevParamsList(%s) reported %d parameters but received %d",
+                            device, expected_count, len(params))
+        return params
 
     # === Sequence commands ========================================================
 
@@ -2254,11 +2324,25 @@ class StreakCamera(model.HwComponent):
         :return: label, current value, param type"""
         return self.sendCommand("SeqParamInfoEx", parameter)
 
-    def SeqParamsList(self):
+    def SeqParamsList(self) -> List[str]:
         """Return list of all parameters related to sequence mode.
         This command can be used to build up a complete parameter list related to sequence mode at runtime.
-        :return: number of parameters, parameters"""
-        return self.sendCommand("SeqParamsList")
+        :return: list of sequence mode parameter names
+        """
+        result = self.sendCommand("SeqParamsList")
+        if not result:
+            logging.warning("SeqParamsList returned empty result.")
+            return []
+        try:
+            expected_count = int(result[0])
+        except (ValueError, IndexError):
+            logging.warning("SeqParamsList returned unexpected format: %s", result)
+            return result
+        params = result[1:]
+        if len(params) != expected_count:
+            logging.warning("SeqParamsList reported %d parameters but received %d",
+                            expected_count, len(params))
+        return params
 
     def SeqSeqMonitor(self, type):
         """This command starts a mode which returns information on every new image or part image acquired in Sequence

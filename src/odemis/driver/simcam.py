@@ -190,7 +190,7 @@ class Camera(model.DigitalCamera):
                     and hasattr(spectrograph, "axes")
                     and isinstance(spectrograph.axes, dict)
                     and "goffset" in spectrograph.axes):
-                raise ValueError((f"spectrograph {spectrograph} must have a 'goffset' attribute"))
+                raise ValueError(f"spectrograph {spectrograph} must have a 'goffset' attribute")
 
             self._spectrograph = spectrograph
             logging.debug("Will simulate spectral peaks using spectrograph %s", spectrograph.name)
@@ -435,8 +435,8 @@ class Camera(model.DigitalCamera):
                      [int(round(ltrb[1] + i * binning[1])) for i in range(res[1])])
             sim_img = self._img[numpy.ix_(coord[1], coord[0])]  # copy
 
-        # spectrograph peak simulation
-        if self._spectrograph:
+        # spectrograph peak simulation (if at 0th order)
+        if self._spectrograph and self._spectrograph.position.value["wavelength"] < 10e-9:
             current_offset = self._spectrograph.position.value["goffset"]
 
             ccd_center_x = self._img_res[0] / 2  # find the x-coordinate of the center of the ccd
@@ -452,16 +452,16 @@ class Camera(model.DigitalCamera):
             width_binned = PEAK_WIDTH / bin_x
 
             peak = simulate_peak(amplitude=20000, x0=peak_center_binned, width=width_binned,
-                                shape=sim_img.shape, dtype=sim_img.dtype)
+                                 shape=sim_img.shape, dtype=sim_img.dtype)
 
             # simulation routine
             sim_img = (peak + self._min_val).astype(self._img.dtype, copy=False)
 
-            # define max noise amplitude
+        # define max noise amplitude
         mx = self._img.max()
         noise_max = max(mx // 100, 10)
 
-            # generate noise and add directly
+        # generate noise and add directly
         noise = numpy.random.randint(0, noise_max, sim_img.shape, dtype=self._img.dtype)
 
         # final clamp to prevent overflow

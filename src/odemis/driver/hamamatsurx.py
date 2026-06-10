@@ -389,7 +389,8 @@ class ReadoutCamera(model.DigitalCamera):
             # AcqLiveMonitor writes images to Ringbuffer, which we can read from
             # only works if we use "Live" or "SingleLive" mode
 
-            self.parent.AcqLiveMonitor("RingBuffer", nbBuffers=3)
+            #self.parent.AcqLiveMonitor("RingBuffer", nbBuffers=3)
+            self.parent.AcqAcqMonitor("EndAcq")
             self.t_image = threading.Thread(target=self._getDataFromBuffer)
             self.t_image.start()
 
@@ -397,7 +398,8 @@ class ReadoutCamera(model.DigitalCamera):
         # Note: Acquisition mode, needs to be before exposureTime!
         # Acquisition mode should be either "Live" (non-sync acq) or "SingleLive" (sync acq) for now.
         if self._sync_event is None:  # do not care about synchronization, start acquire
-            self.parent.StartAcquisition("Live")
+            # self.parent.StartAcquisition("Live")
+            self.parent.StartAcquisition("PC")  # DEBUG
 
         # Force trigger rate reading
         try:
@@ -581,15 +583,33 @@ class ReadoutCamera(model.DigitalCamera):
                 reception_time_image = time.time()
 
                 # get the image from the buffer
-                img_num = rargs[1]
-                img_info = self.parent.ImgRingBufferGet("Data", img_num)
+                event = rargs[0].lower()  # "ringbuffer" if livemonitor and "Endacq", "Endpart" if acqmonitor
+                if event == "ringbuffer":
+                    img_num = rargs[1]
+                    img_info = self.parent.ImgRingBufferGet("Data", img_num)
+                    # returns: iDX,iDY,BBP,Type,seqnumber,timestamp
+                    img_num_actual = img_info[4]
+                    if img_num != img_num_actual:
+                        logging.warning("Requested image number %s, but received number %s. Will use it anyway.",
+                                        img_num, img_num_actual)
+                elif event in ("endacq", "endpart"):
+                    img_info = self.parent.ImgDataGet("current", "data")
+                    # returns: iDX,iDY,BBP,Type . Example: 672,508,2,0
+                else:
+                    logging.warning("Received unknown event %s from queue_img, skipping.", event)
+                    continue
 
                 if not img_info:  # TODO check if this ever happens in log and if not remove!
                     logging.warning("Image info received from buffer is empty!")
                     continue
 
-                img_size = int(img_info[0]) * int(img_info[1]) * 2  # num of bytes we need to receive (uint16)
-                img_num_actual = img_info[4]
+                img_bpp = int(img_info[2])
+                if img_bpp != 2:
+                    logging.warning("Received image with unexpected depth of %s bytes, will try to read it anyway",
+                                    img_bpp)
+                    # TODO: also handle img_bpp == 1 and 4.
+
+                img_size = int(img_info[0]) * int(img_info[1]) * img_bpp  # num of bytes we need to receive (uint16)
 
                 img = b""
                 try:
@@ -601,8 +621,7 @@ class ReadoutCamera(model.DigitalCamera):
 
                 image = numpy.frombuffer(img, dtype=numpy.uint16)  # convert to array
                 image.shape = (int(img_info[1]), int(img_info[0]))
-                logging.debug("Requested image number %s, received number %s of shape %s.",
-                              img_num, img_num_actual, image.shape)
+                logging.debug("Received image of shape %s.", image.shape)
 
                 # Get the scaling table to correct the time axis
                 if self.parent._streakunit.streakMode.value:
@@ -1541,7 +1560,7 @@ class StreakCamera(model.HwComponent):
 
                     if error_code in (4, 5):
                         # A new image is available on the dataport => Send to the special queue
-                        if error_code == 4 and rfunc == "Livemonitor":
+                        if error_code == 4 and rfunc in ("Livemonitor", "Acqmonitor"):
                             self.queue_img.put(rargs)
                         else:
                             self.queue_log.append(msg_splitted)
@@ -1905,7 +1924,7 @@ class StreakCamera(model.HwComponent):
         # Note: args can be only one argument
         if nbBuffers is not None and monitorType == "RingBuffer":
             args = (str(nbBuffers),)
-        return self.sendCommand("acqLiveMonitor", monitorType, *args)
+        return self.sendCommand("AcqLiveMonitor", monitorType, *args)
 
     def AcqLiveMonitorTSInfo(self):
         """Correlates the current time with the timestamp. It outputs the current time and the time stamp.
@@ -1920,7 +1939,7 @@ class StreakCamera(model.HwComponent):
                         Unix or Linux: Seconds and μseconds since 01.01.1970"""
         self.sendCommand("AcqLiveMonitorTSFormat", format)
 
-    def AcqAcqMonitor(self, type):
+    def AcqAcqMonitor(self, type: str) -> List[str]:
         """Starts a mode which returns information on every new image or part image acquired in
         Acquire/Analog Integration or Photon counting mode (Acquisition monitoring).
         :param type: (str)
@@ -2484,7 +2503,7 @@ class StreakCamera(model.HwComponent):
             args += (filename,)
         return self.sendCommand("ImgRingBufferGet", type, seqNumber, *args)
 
-    def ImgDataGet(self, destination, type, *args):
+    def ImgDataGet(self, destination: str, type: str, *args) -> List[str]:
         """
 
         :param destination: (str)

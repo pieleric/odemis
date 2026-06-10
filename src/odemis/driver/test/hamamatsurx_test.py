@@ -20,6 +20,7 @@ import logging
 import os
 
 from odemis import model, util
+from odemis.dataio import hdf5
 from odemis.driver import hamamatsurx
 import time
 from odemis.driver import andorshrk
@@ -37,8 +38,8 @@ logging.basicConfig(level=logging.DEBUG,
 # Export TEST_NOHW = 1 to prevent using the real hardware
 TEST_NOHW = (os.environ.get("TEST_NOHW", "0") != "0")  # Default to Hw testing
 
-#HOST_ADDRESS = "192.168.5.10"
-HOST_ADDRESS = "192.168.56.103"
+HOST_ADDRESS = "192.168.5.10"
+#HOST_ADDRESS = "192.168.56.103"
 
 CLASS_STREAKCAM = hamamatsurx.StreakCamera
 
@@ -68,6 +69,9 @@ STREAK_CHILDREN_NO_DELAYBOX = {"readoutcam": CONFIG_READOUTCAM,
 STREAK_CHILDREN_NO_READOUT_CAM = {"streakunit": CONFIG_STREAKUNIT,
                                   "delaybox": CONFIG_DELAYBOX}
 
+STREAK_CHILDREN_SYNC_NOD = {"readoutcam": CONFIG_READOUTCAM,
+                            "streakunit": CONFIG_SYNCHROSCAN}
+
 KWARGS_STREAKCAM = dict(name="streak cam", role="ccd", host=HOST_ADDRESS, port=1001,
                         children=STREAK_CHILDREN)
 KWARGS_STREAKCAM_SYNC = dict(name="streak cam", role="ccd", host=HOST_ADDRESS, port=1001,
@@ -76,6 +80,10 @@ KWARGS_STREAKCAM_SYNC = dict(name="streak cam", role="ccd", host=HOST_ADDRESS, p
 KWARGS_STREAKCAM_NO_DELAYBOX = dict(name="streak cam", role="ccd", host=HOST_ADDRESS, port=1001,
                                     settings_ini="C:\\ProgramData\\Hamamatsu\\HPDTA\\hpdta-single-sweep.ini",
                                     children=STREAK_CHILDREN_NO_DELAYBOX)
+KWARGS_STREAKCAM_SYNC_NOD = dict(name="streak cam", role="ccd", host=HOST_ADDRESS, port=1001,
+                             settings_ini="C:\\ProgramData\\Hamamatsu\\HPDTA\\hpdta-synchroscan.ini",
+                             children=STREAK_CHILDREN_SYNC_NOD)
+
 KWARGS_STREAKCAM_NO_READOUT_CAM = dict(name="streak cam", role="ccd", host=HOST_ADDRESS, port=1001,
                                        children=STREAK_CHILDREN_NO_READOUT_CAM)
 
@@ -286,7 +294,7 @@ class TestHamamatsurxCam(unittest.TestCase):
         if TEST_NOHW:
             raise unittest.SkipTest('No streak camera HW present. Skipping tests.')
 
-        cls.streakcam = CLASS_STREAKCAM(**KWARGS_STREAKCAM)
+        cls.streakcam = CLASS_STREAKCAM(**KWARGS_STREAKCAM_SYNC_NOD)
 
         for child in cls.streakcam.children.value:
             if child.name == CONFIG_READOUTCAM["name"]:
@@ -750,6 +758,53 @@ class TestHamamatsurxCam(unittest.TestCase):
 
         time.sleep(num_images * 0.2 * 2)  # wait some time for acquisition to finish
         self.assertEqual(len(self.readoutcam.queue_events), 0)
+
+    # Special commands for the photon-counting mode
+    def test_photon_counting_options(self):
+        dev = self.streakcam
+        param_names = dev.CamParamsList("PC")
+        for name in param_names:
+            vals = dev.CamParamGet("PC", name)
+            infos = dev.CamParamInfoEx("PC", name)
+            print(f"Param {name} has value {vals}: {infos}")
+
+        param_names = dev.AcqParamsList()
+        for name in param_names:
+            vals = dev.AcqParamInfoEx(name)
+            print(f"Acq Param {name} has value {vals}")
+
+    def test_acq_photon_counting(self):
+
+        try:
+            print("Press a key when ready to start the acquisition in photon counting mode...")
+            input()
+
+            dev = self.streakcam
+            exp_time = dev.CamParamGet("PC", "Exposure")
+            print("Exposure:", exp_time)
+            nr_exp = dev.CamParamGet("PC", "NrExposures")
+            print("NrExposures:", nr_exp)
+
+            # test a first value
+            self.streakunit.timeRange.value = util.find_closest(0.000000002, self.streakunit.timeRange.choices)  # 2ns
+            self.streakunit.streakMode.value = True
+            # Note: RemoteEx automatically stops and restarts "Live" acq when changing settings
+
+            img = self.readoutcam.data.get()
+            hdf5.export("test_acq_photon_counting1.hdf5", img)
+            print(img.shape)
+
+            self.assertIn(model.MD_TIME_LIST, img.metadata)
+            self.assertIsNotNone(img.metadata[model.MD_TIME_LIST])
+
+            img = self.readoutcam.data.get()
+            hdf5.export("test_acq_photon_counting2.hdf5", img)
+            print(img.shape)
+
+            self.assertIn(model.MD_TIME_LIST, img.metadata)
+            self.assertIsNotNone(img.metadata[model.MD_TIME_LIST])
+        except KeyboardInterrupt:
+            print("Test interrupted by user.")
 
 
 class TestHamamatsurxCamWithSpectrograph(unittest.TestCase):

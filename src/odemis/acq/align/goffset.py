@@ -62,8 +62,7 @@ def find_peak_position(data: numpy.ndarray, window_radius: int = 15, snr_thresho
 
     # geometric smoothing and noise calculation
     smoothed_data = Smooth(spectrum, window_len=11)
-    clean_data = smoothed_data - numpy.median(smoothed_data)
-    noise_std = numpy.std(clean_data)
+    noise_std = numpy.std(smoothed_data - spectrum)
 
     # detect peak
     maxtab, _ = Detect(smoothed_data, lookahead=10, delta=(noise_std + 1e-6) * snr_threshold)
@@ -134,8 +133,9 @@ def peak_is_present(spectrum: numpy.ndarray,
         spectrum_1d = spectrum_1d.max(axis=0)
 
     smoothed_data = Smooth(spectrum_1d, window_len=11) # remove any hot pixels
-    clean_data = smoothed_data - numpy.median(smoothed_data)
-    noise_std = numpy.std(clean_data)
+    # clean_data = smoothed_data - numpy.median(smoothed_data)
+    # noise_std = numpy.std(clean_data)
+    noise_std = numpy.std(smoothed_data - spectrum_1d)
 
     # use Detect to reject high-amplitude noise spikes that lack Gaussian geometry
     maxtab, _ = Detect(smoothed_data, lookahead=10, delta=(noise_std + 1e-6) * snr_threshold)

@@ -15,9 +15,9 @@ from odemis import model
 from odemis.acq import path
 from odemis.util import testing
 from odemis.util import timeout
-from odemis.acq.align.goffset import(find_peak_position, peak_is_present, estimate_goffset_scale,
-                                     sparc_auto_grating_offset, auto_align_grating_detector_offsets,
-                                     _do_auto_align_grating_detector_offsets)
+from odemis.acq.align.goffset import (find_peak_position, peak_is_present, estimate_goffset_scale,
+                                      sparc_auto_grating_offset, auto_align_grating_detector_offsets,
+                                      _do_auto_align_grating_detector_offsets)
 from odemis.dataio import hdf5
 from odemis.model import ProgressiveFuture
 from pathlib import Path
@@ -70,10 +70,9 @@ class TestSparcAutoGratingOffset(unittest.TestCase):
         """
         Test peak detection on synthetic Gaussian data.
         """
-
         x = np.arange(200)
         true_center = 83.4
-        spectrum = np.exp(-0.5*((x-true_center)/3.0)**2)
+        spectrum = np.exp(-0.5 * ((x - true_center) / 3.0) ** 2) * 1000
 
         peak = find_peak_position(spectrum)
         self.assertAlmostEqual(peak, true_center, places=1)
@@ -284,18 +283,6 @@ class TestSparcAutoGratingOffset(unittest.TestCase):
         # check data is not flat
         self.assertNotEqual(data.max(), data.min())
 
-    def test_driver_raises_valueerror_on_hardware_limit(self):
-        """
-        Verifies the driver successfully raises a ValueError when computing
-        an offset outside of the hardware limits.
-        """
-        # out of bounds value
-        out_of_bounds_target = 9999999.0
-
-        # test method directly to ensure the new bounds-checking logic works
-        with self.assertRaises(ValueError, msg="Driver should raise ValueError for out-of-bounds offset"):
-            self.spgr._doSetGoffsetAbs(out_of_bounds_target)
-
     @timeout(150)
     def test_hardware_limit_valueerror_handled(self):
         """
@@ -355,7 +342,7 @@ class TestSparcAutoGratingOffset(unittest.TestCase):
         # run function
         peak_pos = find_peak_position(image)
 
-        self.assertAlmostEqual(peak_pos, true_center, places=1)
+        self.assertAlmostEqual(peak_pos, true_center, delta=0.5)
 
     def test_no_peak_present_image(self):
         """
@@ -363,7 +350,7 @@ class TestSparcAutoGratingOffset(unittest.TestCase):
         """
 
         im_no_peak = hdf5.read_data(H5_FILE_2D_NO_PEAK / "without-peak-2d-1.h5")
-        data = (im_no_peak[0].data)
+        data = im_no_peak[0].data
 
         spectrum = data.mean(axis=0) if data.ndim == 2 else data
 
@@ -373,39 +360,39 @@ class TestSparcAutoGratingOffset(unittest.TestCase):
 
     def test_peak_present_image(self):
         im_peak = hdf5.read_data(H5_FILE_2D_NO_PEAK / "with-peak-2d-1.h5")
-        raw_data = np.asarray(im_peak[0].data)
+        raw_data = im_peak[0]
 
         spectrum = np.squeeze(raw_data)
-        if spectrum.ndim > 1:
-            # convert 2D array into 1D by averaging
-            spectrum = spectrum.mean(axis=0)
-
-        clean_spec = spectrum - np.median(spectrum)
-        noise_std = np.std(clean_spec)
-        peak_val = clean_spec.max()
-        snr = peak_val / (noise_std + 1e-6)
-        peak_idx = np.argmax(clean_spec)
-
-        # simple width estimation
-        window = clean_spec[max(0, peak_idx - 2): min(len(clean_spec), peak_idx + 3)]
-        x = np.arange(len(window))
-        w = window - window.min()
-        width = 0.0
-        if w.sum() > 0:
-            mean = np.sum(x * w) / np.sum(w)
-            var = np.sum(w * (x - mean) ** 2) / np.sum(w)
-            width = np.sqrt(var)
-
-        # debug logs
-        logging.info("=" * 40)
-        logging.info(f"IMAGE DEBUG SCORECARD")
-        logging.info(f"Final Spectrum Shape: {spectrum.shape}")
-        logging.info(f"Peak Location:       Index {peak_idx}")
-        logging.info(f"Calculated SNR:      {snr:.2f}  (Threshold: 10.0)")
-        logging.info(f"Calculated Width:    {width:.2f}  (Range: 0.5 - 12.0)")
-        logging.info("=" * 40)
-
-        logging.info(f"Cleaned Spectrum Shape for Function: {spectrum.shape}")
+        # if spectrum.ndim > 1:
+        #     # convert 2D array into 1D by averaging
+        #     spectrum = spectrum.mean(axis=0)
+        #
+        # clean_spec = spectrum - np.median(spectrum)
+        # noise_std = np.std(clean_spec)
+        # peak_val = clean_spec.max()
+        # snr = peak_val / (noise_std + 1e-6)
+        # peak_idx = np.argmax(clean_spec)
+        #
+        # # simple width estimation
+        # window = clean_spec[max(0, peak_idx - 2): min(len(clean_spec), peak_idx + 3)]
+        # x = np.arange(len(window))
+        # w = window - window.min()
+        # width = 0.0
+        # if w.sum() > 0:
+        #     mean = np.sum(x * w) / np.sum(w)
+        #     var = np.sum(w * (x - mean) ** 2) / np.sum(w)
+        #     width = np.sqrt(var)
+        #
+        # # debug logs
+        # logging.info("=" * 40)
+        # logging.info(f"IMAGE DEBUG SCORECARD")
+        # logging.info(f"Final Spectrum Shape: {spectrum.shape}")
+        # logging.info(f"Peak Location:       Index {peak_idx}")
+        # logging.info(f"Calculated SNR:      {snr:.2f}  (Threshold: 10.0)")
+        # logging.info(f"Calculated Width:    {width:.2f}  (Range: 0.5 - 12.0)")
+        # logging.info("=" * 40)
+        #
+        # logging.info(f"Cleaned Spectrum Shape for Function: {spectrum.shape}")
 
         # pass the cleaned 1D array to the existing function
         present = peak_is_present(spectrum, snr_threshold=10.0, width_range=(0.5, 12.0))

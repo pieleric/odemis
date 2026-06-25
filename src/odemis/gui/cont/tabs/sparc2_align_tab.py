@@ -1549,8 +1549,9 @@ class Sparc2AlignTab(Tab):
             logging.debug("Optical path was updated.")
 
 
-    # Auto-Calibration
+    # Grating auto-calibration
     def _on_btn_grating_calibration(self, evt):
+        # Procedure is running -> the button is used to cancel it
         if not self._grating_calibration_future.done():
             self._grating_calibration_future.cancel()
             return
@@ -1559,12 +1560,11 @@ class Sparc2AlignTab(Tab):
         self.panel.gauge_auto_grating_center.SetValue(0)
         self.panel.btn_auto_grating_center.SetLabel("Cancel")
 
-        wx.CallAfter(self._start_grating_calibration)
+        self._start_grating_calibration()
 
     def _start_grating_calibration(self):
         main = self.tab_data_model.main
         align_mode = self.tab_data_model.align_mode.value
-        opm = main.opm
 
         # Set the optical path according to the align mode
         if align_mode == "streak-align":
@@ -1611,13 +1611,26 @@ class Sparc2AlignTab(Tab):
             "Starting grating calibration: detectors=%s selector=%s path=%s",
             [d.name for d in detectors], selector.position.value if selector else None, opath)
 
+        #self._stream_controller.pauseStreams()
+        # TODO: make sure one stream is playing? => create a dedicated stream?
+        # TODO: Force CCD stream to be binning 1 horizontally, to ensure highest resolution.
+
         # Start alignment procedure
         self._grating_calibration_future = auto_align_grating_detector_offsets(
-            spectrograph, detectors, opm, opath, bl, selector=selector)
+            spectrograph, detectors, main.opm, opath, bl, selector=selector)
 
         # Bind progress & done callbacks
         self._grating_calibration_future.add_done_callback(self._on_grating_calibration_done)
         self.panel.btn_auto_grating_center.SetLabel("Cancel")
+
+        # Disable the rest of the GUI
+        # FIXME: copy from _onAutofocus
+        if align_mode == "tunnel-lens-align":
+            self.panel.btn_manual_focus_ext.Enable(False)
+        else:
+            self.panel.btn_manual_focus.Enable(False)
+        self._enableFocusComponents(manual=False, ccd_stream=False)
+        self.panel.btn_bkg_acquire.Enable(False)
 
         self._pfc_grating_calibration = ProgressiveFutureConnector(self._grating_calibration_future,
                                                                    self.panel.gauge_auto_grating_center)
@@ -1631,12 +1644,14 @@ class Sparc2AlignTab(Tab):
         except Exception:
             logging.exception("Grating calibration failed")
 
-        finally:
-            self._grating_calibration_future = model.InstantaneousFuture()
-            self._pfc_grating_calibration = None
+        self._grating_calibration_future = model.InstantaneousFuture()
+        self._pfc_grating_calibration = None
 
-            wx.CallAfter(self.panel.btn_auto_grating_center.SetLabel, "Auto center")
-            wx.CallAfter(self.panel.gauge_auto_grating_center.SetValue, 0)
+        # Go back to "normal" mode, which is the simplest to enable the right widgets and play the rigth stream.
+        self._onAlignMode(self.tab_data_model.align_mode.value)
+
+        wx.CallAfter(self.panel.btn_auto_grating_center.SetLabel, "Auto calib")
+        wx.CallAfter(self.panel.gauge_auto_grating_center.SetValue, 0)
 
     @call_in_wx_main
     def _on_lens_align_done(self, f):

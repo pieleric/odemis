@@ -239,11 +239,13 @@
     affects: ["SEM E-beam", "Streak Readout CCD", "SEM Detector", "CL Detector", "EBIC"],
 }
 
-# simple simulated streak camera
+# Streak camera simulator using the HPDTASim (RemoteEx protocol)
 "Streak Camera": {
-    class: simstreakcam.StreakCamera,
+    class: hamamatsurx.StreakCamera,
     role: streak-cam,
     init: {
+        host: "fake-singlesweep",  # starts a local HPDTA simulator
+        port: 11001,
     },
     children: {
         readoutcam: "Streak Readout CCD",
@@ -260,7 +262,7 @@
 #    class: hamamatsurx.StreakCamera,
 #    role: streak-cam,
 #    init: {
-#        host: "172.16.4.2",  # Braunschweig System
+#        host: "172.16.4.2",
 #        port: 1001
 #    },
 #    children: {
@@ -276,8 +278,6 @@
 "Streak Readout CCD": {
     role: streak-ccd,
     init: {
-        image: "sparc-ar-mirror-align.h5",  # only for simulator!  TODO replace with streak image
-#       device: 0,
         transp: [-1, 2], # if mirrored on X axis
     },
     metadata: {
@@ -288,7 +288,6 @@
 "Streak Unit": {
     role: streak-unit,
     init: {
-#        settings_ini: "C:\ProgramData\Hamamatsu\HPDTA\SingleSweep.ini" # path of the .ini file for HPDTA to run
     },
     affects: ["Streak Readout CCD"],
 }

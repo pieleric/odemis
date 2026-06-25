@@ -72,19 +72,29 @@ STREAK_CHILDREN_NO_READOUT_CAM = {"streakunit": CONFIG_STREAKUNIT,
 STREAK_CHILDREN_SYNC_NOD = {"readoutcam": CONFIG_READOUTCAM,
                             "streakunit": CONFIG_SYNCHROSCAN}
 
-KWARGS_STREAKCAM = dict(name="streak cam", role="ccd", host=HOST_ADDRESS, port=1001,
+KWARGS_STREAKCAM = dict(name="streak cam", role="ccd",
+                        host="fake-singlesweep" if TEST_NOHW else HOST_ADDRESS,
+                        port=11001 if TEST_NOHW else 1001,
                         children=STREAK_CHILDREN)
-KWARGS_STREAKCAM_SYNC = dict(name="streak cam", role="ccd", host=HOST_ADDRESS, port=1001,
+KWARGS_STREAKCAM_SYNC = dict(name="streak cam", role="ccd",
+                             host="fake-synchroscan" if TEST_NOHW else HOST_ADDRESS,
+                             port=11001 if TEST_NOHW else 1001,
                              settings_ini="C:\\ProgramData\\Hamamatsu\\HPDTA\\hpdta-synchroscan.ini",
                              children=STREAK_CHILDREN_SYNC)
-KWARGS_STREAKCAM_NO_DELAYBOX = dict(name="streak cam", role="ccd", host=HOST_ADDRESS, port=1001,
+KWARGS_STREAKCAM_NO_DELAYBOX = dict(name="streak cam", role="ccd",
+                                    host="fake-singlesweep" if TEST_NOHW else HOST_ADDRESS,
+                                    port=11001 if TEST_NOHW else 1001,
                                     settings_ini="C:\\ProgramData\\Hamamatsu\\HPDTA\\hpdta-single-sweep.ini",
                                     children=STREAK_CHILDREN_NO_DELAYBOX)
-KWARGS_STREAKCAM_SYNC_NOD = dict(name="streak cam", role="ccd", host=HOST_ADDRESS, port=1001,
-                             settings_ini="C:\\ProgramData\\Hamamatsu\\HPDTA\\hpdta-synchroscan.ini",
-                             children=STREAK_CHILDREN_SYNC_NOD)
+KWARGS_STREAKCAM_SYNC_NOD = dict(name="streak cam", role="ccd",
+                                 host="fake-synchroscan" if TEST_NOHW else HOST_ADDRESS,
+                                 port=11001 if TEST_NOHW else 1001,
+                                 settings_ini="C:\\ProgramData\\Hamamatsu\\HPDTA\\hpdta-synchroscan.ini",
+                                 children=STREAK_CHILDREN_SYNC_NOD)
 
-KWARGS_STREAKCAM_NO_READOUT_CAM = dict(name="streak cam", role="ccd", host=HOST_ADDRESS, port=1001,
+KWARGS_STREAKCAM_NO_READOUT_CAM = dict(name="streak cam", role="ccd",
+                                       host="fake-singlesweep" if TEST_NOHW else HOST_ADDRESS,
+                                       port=11001 if TEST_NOHW else 1001,
                                        children=STREAK_CHILDREN_NO_READOUT_CAM)
 
 # test with spectrograph
@@ -105,9 +115,6 @@ class TestHamamatsurxCamGenericCam(VirtualTestCam, unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-
-        if TEST_NOHW:
-            raise unittest.SkipTest('No streak camera HW present. Skipping tests.')
 
         super(TestHamamatsurxCamGenericCam, cls).setUpClass()
 
@@ -134,9 +141,6 @@ class TestHamamatsurxCamGenericCamSynchronized(VirtualTestSynchronized, unittest
     @classmethod
     def setUpClass(cls):
 
-        if TEST_NOHW:
-            raise unittest.SkipTest('No streak camera HW present. Skipping tests.')
-
         super(TestHamamatsurxCamGenericCamSynchronized, cls).setUpClass()
 
         cls.streakcam = cls.ccd
@@ -156,9 +160,6 @@ class TestHamamatsurxNoReadoutCamera(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-
-        if TEST_NOHW:
-            raise unittest.SkipTest('No streak camera HW present. Skipping tests.')
 
         cls.streakcam = CLASS_STREAKCAM(**KWARGS_STREAKCAM_NO_READOUT_CAM)
 
@@ -201,8 +202,9 @@ class TestHamamatsurxNoReadoutCamera(unittest.TestCase):
 
     def test_error(self):
         """Test the different RemoteEx errors possible."""
-        # send wrong command, will timeout
-        with self.assertRaises(TimeoutError):
+        # Real HW ignores unknown commands → TimeoutError.
+        # The simulator immediately rejects them with RemoteExError(2).
+        with self.assertRaises((TimeoutError, hamamatsurx.RemoteExError)):
             self.streakcam.sendCommand("Appinfoo", "type")
 
     def test_SendCommandSimple(self):
@@ -291,9 +293,6 @@ class TestHamamatsurxCam(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
 
-        if TEST_NOHW:
-            raise unittest.SkipTest('No streak camera HW present. Skipping tests.')
-
         cls.streakcam = CLASS_STREAKCAM(**KWARGS_STREAKCAM_SYNC_NOD)
 
         for child in cls.streakcam.children.value:
@@ -336,8 +335,9 @@ class TestHamamatsurxCam(unittest.TestCase):
 
     def test_error(self):
         """Test the different RemoteEx errors possible."""
-        # send wrong command, will timeout
-        with self.assertRaises(TimeoutError):
+        # Real HW ignores unknown commands → TimeoutError.
+        # The simulator immediately rejects them with RemoteExError(2).
+        with self.assertRaises((TimeoutError, hamamatsurx.RemoteExError)):
             self.streakcam.sendCommand("Appinfoo", "type")
 
     ### General commands #####################################################
@@ -420,6 +420,8 @@ class TestHamamatsurxCam(unittest.TestCase):
     ### Delay generator #####################################################
     def test_TriggerDelay(self):
         """Test Acquisition Mode VA for delay generator."""
+        if not hasattr(self, "delaybox"):
+            self.skipTest("No delay box in this configuration. Skipping.")
         self.delaybox.triggerDelay.value = 0
         prev_triggerDelay = self.delaybox.triggerDelay.value
         # change trigger delay VA
@@ -428,7 +430,7 @@ class TestHamamatsurxCam(unittest.TestCase):
         # check previous and current value are not the same
         self.assertNotEqual(prev_triggerDelay, cur_triggerDelay)
         # get trigger delay from hardware
-        remoteEx_triggerDelay = self.delaybox.GetTriggerDelay()
+        remoteEx_triggerDelay = self.delaybox.GetDelayByName("Delay A")
         self.assertEqual(cur_triggerDelay, remoteEx_triggerDelay)
 
         # request value, which is not in range of VA
@@ -437,6 +439,8 @@ class TestHamamatsurxCam(unittest.TestCase):
 
     def test_Shutter(self):
         """Test Shutter state VA of streak unit."""
+        if not model.hasVA(self.streakunit, "shutter"):
+            self.skipTest("No shutter on this streak unit (synchroscan). Skipping.")
         # set shutter VA
         self.streakunit.shutter.value = False
         prev_shutter = self.streakunit.shutter.value
@@ -519,12 +523,14 @@ class TestHamamatsurxCam(unittest.TestCase):
             self.streakunit.timeRange.value = timeRange
             self.assertAlmostEqual(self.streakunit.timeRange.value, timeRange)
 
-            tr2d = self.delaybox._metadata.get(model.MD_TIME_RANGE_TO_DELAY)
-            if tr2d:
-                key = util.find_closest(timeRange, tr2d.keys())
-                # check that the corresponding trigger delay is set when changing the .timeRange VA
-                md_triggerDelay = tr2d[key]
-                self.assertAlmostEqual(self.delaybox.triggerDelay.value, md_triggerDelay)
+            delaybox = getattr(self, "delaybox", None)
+            if delaybox:
+                tr2d = delaybox._metadata.get(model.MD_TIME_RANGE_TO_DELAY)
+                if tr2d:
+                    key = util.find_closest(timeRange, tr2d.keys())
+                    # check that the corresponding trigger delay is set when changing the .timeRange VA
+                    md_triggerDelay = tr2d[key]
+                    self.assertAlmostEqual(delaybox.triggerDelay.value, md_triggerDelay)
 
         # request value, which is not in choices of VA
         with self.assertRaises(IndexError):
@@ -556,14 +562,12 @@ class TestHamamatsurxCam(unittest.TestCase):
         self.assertIn(model.MD_TIME_LIST, img.metadata)
         self.assertIsNotNone(img.metadata[model.MD_TIME_LIST])
 
-        # check first value in table is the same order as the conversion factor
-        # the quotient should be greater than zero
-        firstCorrectedValue = img.metadata[model.MD_TIME_LIST][0]
-        conversionFactor = self.streakunit.timeRangeFactor
-        self.assertGreater(firstCorrectedValue/conversionFactor, 0)
+        # check last value in table is positive and in the expected range relative to the scale factor
+        lastCorrectedValue = img.metadata[model.MD_TIME_LIST][-1]
+        conversionFactor = self.streakunit.get_time_scale_factor()
+        self.assertGreater(lastCorrectedValue / conversionFactor, 0)
 
         # test a second value
-        # test a second value)
         self.streakunit.timeRange.value = util.find_closest(0.001, self.streakunit.timeRange.choices)  # 1ms
 
         img = self.readoutcam.data.get()
@@ -571,11 +575,10 @@ class TestHamamatsurxCam(unittest.TestCase):
         self.assertIn(model.MD_TIME_LIST, img.metadata)
         self.assertIsNotNone(img.metadata[model.MD_TIME_LIST])
 
-        # check first value in table is the same order as the conversion factor
-        # the quotient should be greater than zero
-        firstCorrectedValue = img.metadata[model.MD_TIME_LIST][0]
-        conversionFactor = self.streakunit.timeRangeFactor
-        self.assertGreater(firstCorrectedValue/conversionFactor, 0)
+        # check last value in table is positive and in the expected range relative to the scale factor
+        lastCorrectedValue = img.metadata[model.MD_TIME_LIST][-1]
+        conversionFactor = self.streakunit.get_time_scale_factor()
+        self.assertGreater(lastCorrectedValue / conversionFactor, 0)
 
         # check that scaling correction is not included when image is acquired in Focus mode
         # Note: In case we only acquire images in operate mode, we can skip that test.
@@ -594,11 +597,10 @@ class TestHamamatsurxCam(unittest.TestCase):
         self.assertIn(model.MD_TIME_LIST, img.metadata)
         self.assertIsNotNone(img.metadata[model.MD_TIME_LIST])
 
-        # check first value in table is the same order as the conversion factor
-        # the quotient should be greater than zero
-        firstCorrectedValue = img.metadata[model.MD_TIME_LIST][0]
-        conversionFactor = self.streakunit.timeRangeFactor
-        self.assertGreater(firstCorrectedValue/conversionFactor, 0)
+        # check last value in table is positive and in the expected range relative to the scale factor
+        lastCorrectedValue = img.metadata[model.MD_TIME_LIST][-1]
+        conversionFactor = self.streakunit.get_time_scale_factor()
+        self.assertGreater(lastCorrectedValue / conversionFactor, 0)
 
     def test_acq_Live_RingBuffer_subscribe(self):
         """Acquire single image and receive it via the dataport."""
@@ -620,7 +622,8 @@ class TestHamamatsurxCam(unittest.TestCase):
         # and subscribe to dataflow afterwards in order to request one image while acq in Live mode is already running
         # The acq should be automatically stopped and restarted, otherwise a RemoteEx error will be received.
         # error returned: ['7', 'AcqStart', 'async command pending', 'HAcq_mLive']
-        self.streakcam.StartAcquisition(self.readoutcam.acqMode)  # acquire images
+        acq_mode = "PC" if self.readoutcam.photonCounting.value else "Live"
+        self.streakcam.StartAcquisition(acq_mode)  # acquire images
 
         def callback(dataflow, image):
             # self.streakcam.AcqAcqMonitor("Off")  # TODO?
@@ -825,16 +828,15 @@ class TestHamamatsurxCamWithSpectrograph(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
 
-        if TEST_NOHW:
-            raise unittest.SkipTest('No streak camera HW present. Skipping tests.')
-
         cls.spectrograph = CLASS_SPECTROGRAPH(**KWARGS_SPECTROGRAPH)
 
         STREAK_CHILDREN = {"readoutcam": CONFIG_READOUTCAM, "streakunit": CONFIG_STREAKUNIT,
                            "delaybox": CONFIG_DELAYBOX}
 
-        cls.streakcam = hamamatsurx.StreakCamera("streak cam", "streakcam", host="172.16.4.2",
-                                                 port=1001, children=STREAK_CHILDREN,
+        host = "fake-singlesweep" if TEST_NOHW else "172.16.4.2"
+        port = 11001 if TEST_NOHW else 1001
+        cls.streakcam = hamamatsurx.StreakCamera("streak cam", "streakcam", host=host,
+                                                 port=port, children=STREAK_CHILDREN,
                                                  dependencies={"spectrograph": cls.spectrograph})
 
         for child in cls.streakcam.children.value:

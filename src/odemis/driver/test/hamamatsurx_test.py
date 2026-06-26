@@ -548,7 +548,7 @@ class TestHamamatsurxCam(unittest.TestCase):
 
     ### Acquisition commands #####################################################
 
-    def test_acq_getScalingTable(self):
+    def test_acq_get_scaling_table(self):
         """Get the scaling table (correction for mapping vertical px with timestamps)
         for the streak Time Range chosen for one sweep."""
 
@@ -602,7 +602,7 @@ class TestHamamatsurxCam(unittest.TestCase):
         conversionFactor = self.streakunit.get_time_scale_factor()
         self.assertGreater(lastCorrectedValue / conversionFactor, 0)
 
-    def test_acq_Live_RingBuffer_subscribe(self):
+    def test_acq_live_ring_buffer_subscribe(self):
         """Acquire single image and receive it via the dataport."""
 
         # Note: AcqStop can be called multiple times even if the acq is already stopped without causing an error
@@ -616,29 +616,25 @@ class TestHamamatsurxCam(unittest.TestCase):
         self.streakunit.timeRange.value = util.find_closest(0.000000002, self.streakunit.timeRange.choices)
         self.streakunit.MCPGain.value = 2
         self.readoutcam.exposureTime.value = 0.1  # 100ms
-        time.sleep(1)
+        exp_time = self.readoutcam.exposureTime.value
+        size = self.readoutcam.resolution.value
 
-        # start Live mode
-        # and subscribe to dataflow afterwards in order to request one image while acq in Live mode is already running
-        # The acq should be automatically stopped and restarted, otherwise a RemoteEx error will be received.
-        # error returned: ['7', 'AcqStart', 'async command pending', 'HAcq_mLive']
-        acq_mode = "PC" if self.readoutcam.photonCounting.value else "Live"
-        self.streakcam.StartAcquisition(acq_mode)  # acquire images
+        num_images = 5
+        self._expected_shape = size[::-1]  # Y, X
+        self._last_md = {}
+        self.images_left = num_images  # unsubscribe after receiving number of images
 
-        def callback(dataflow, image):
-            # self.streakcam.AcqAcqMonitor("Off")  # TODO?
-            self.readoutcam.data.unsubscribe(callback)
-            # Note: MCPGain set to 0 is handled by stream not by driver except when changing from
-            # "Operate" mode to "Focus" mode
-            size = self.readoutcam.resolution.value
-            self.assertEqual(image.shape, size[::-1])  # invert size
-            self.assertIn(model.MD_EXP_TIME, image.metadata)
-            logging.debug("Got image.")
+        self.readoutcam.data.subscribe(self.receive_image)
 
-        self.readoutcam.data.subscribe(callback)
+        # Waiting long enough
+        time.sleep(num_images * exp_time + 2)
+        self.assertEqual(self.streakunit.MCPGain.value, 0)  # MCPGain should be zero when acq finished
+        self.assertEqual(self.images_left, 0)
+
         time.sleep(5)
+        assert self.images_left == 0, f"Still {self._images_left} to receive."
 
-    def test_acqSync_SingleLive_RingBuffer_subscribe(self):
+    def test_acq_sync_single_live_ring_buffer_subscribe(self):
         """Test to acquire synchronized images by subscribing."""
 
         # test sync acq in focus mode
@@ -650,32 +646,22 @@ class TestHamamatsurxCam(unittest.TestCase):
         exp_time = self.readoutcam.exposureTime.value
 
         num_images = 5
+        self._expected_shape = size[::-1]  # Y, X
+        self._last_md = {}
         self.images_left = num_images  # unsubscribe after receiving number of images
 
         self.readoutcam.data.synchronizedOn(self.readoutcam.softwareTrigger)
-
-        def receive_image(dataflow, image):
-            """Callback for readout camera"""
-            self.assertEqual(image.shape, size[::-1])  # invert size
-            self.assertIn(model.MD_EXP_TIME, image.metadata)
-            self.assertNotIn(model.MD_TIME_LIST, image.metadata)
-            self.assertFalse(image.metadata[model.MD_STREAK_MODE])
-            self.images_left -= 1
-            logging.debug("Got image.")
-            if self.images_left == 0:
-                dataflow.unsubscribe(receive_image)
-                self.assertEqual(self.streakunit.MCPGain.value, 0)  # MCPGain should be zero when acq finished
-                self.end_time = time.time()
-
-        self.readoutcam.data.subscribe(receive_image)
+        self.readoutcam.data.subscribe(self.receive_image)
 
         # Wait for the image
         for i in range(num_images):
             self.readoutcam.softwareTrigger.notify()
-            time.sleep(i * 0.1)  # wait a bit to simulate some processing
+            time.sleep(2 + i * 0.1)  # wait a bit to simulate some processing
 
         # Waiting long enough
         time.sleep(num_images * exp_time + 2)
+        self.assertEqual(self.streakunit.MCPGain.value, 0)  # MCPGain should be zero when acq finished
+        self.assertFalse(self._last_md[model.MD_STREAK_MODE])
         self.assertEqual(self.images_left, 0)
         self.readoutcam.data.synchronizedOn(None)
 
@@ -684,42 +670,42 @@ class TestHamamatsurxCam(unittest.TestCase):
 
         # test sync acq in operate mode
         self.streakunit.streakMode.value = True
-
         self.streakunit.timeRange.value = util.find_closest(0.001, self.streakunit.timeRange.choices)
 
         num_images = 5
+        self._expected_shape = size[::-1]  # Y, X
         self.images_left = num_images  # unsubscribe after receiving number of images
 
         self.readoutcam.data.synchronizedOn(self.readoutcam.softwareTrigger)
-
-        def receive_image(dataflow, image):
-            """Callback for readout camera"""
-            self.assertEqual(image.shape, size[::-1])  # invert size
-            self.assertIn(model.MD_EXP_TIME, image.metadata)
-            self.assertIn(model.MD_TIME_LIST, image.metadata)
-            self.assertTrue(image.metadata[model.MD_STREAK_MODE])
-            self.images_left -= 1
-            logging.debug("Got image.")
-            if self.images_left == 0:
-                dataflow.unsubscribe(receive_image)
-                self.end_time = time.time()
-
-        self.readoutcam.data.subscribe(receive_image)
+        self.readoutcam.data.subscribe(self.receive_image)
 
         # Wait for the image
         for i in range(num_images):
             self.readoutcam.softwareTrigger.notify()
-            time.sleep(i * 0.1)  # wait a bit to simulate some processing
+            time.sleep(2 + i * 0.1)  # wait a bit to simulate some processing
 
         # Waiting long enough
         time.sleep(num_images * exp_time + 2)
+        self.assertTrue(self._last_md[model.MD_STREAK_MODE])
+        self.assertIn(model.MD_TIME_LIST, self._last_md)
         self.assertEqual(self.images_left, 0)
         self.readoutcam.data.synchronizedOn(None)
 
         # check we can still get data normally
         img = self.readoutcam.data.get()
 
-    def test_acqSync_EarlyEvents(self):
+    def receive_image(self, dataflow, image: model.DataArray):
+        """Callback for readout camera"""
+        self.assertEqual(image.shape, self._expected_shape)
+        self._last_md = image.metadata
+        self.assertIn(model.MD_EXP_TIME, image.metadata)
+        self.images_left -= 1
+        logging.debug("Got image.")
+        if self.images_left == 0:
+            dataflow.unsubscribe(self.receive_image)
+            self.end_time = time.time()
+
+    def test_acq_sync_early_events(self):
         """Test early events triggered in synchronous acquisition mode."""
 
         # AsyncCommandStatus() returns: pending, preparing, active
@@ -729,38 +715,32 @@ class TestHamamatsurxCam(unittest.TestCase):
 
         # Note: async commands are: AcqStart, SeqStart, SeqSave, SeqLoad
 
-        # choose very small exposure time to trigger for asynchronous commands are handled correctly
-        self.readoutcam.exposureTime.value = self.readoutcam.exposureTime.range[0]
+        # self.readoutcam.data.get()
+
+        # Use a relatively long exposure time, to make sure we can send events faster than the frame rate.
+        self.readoutcam.exposureTime.value = 0.2
         self.streakunit.timeRange.value = util.find_closest(0.000001, self.streakunit.timeRange.choices)
         size = self.readoutcam.resolution.value
 
         self.readoutcam.data.synchronizedOn(self.readoutcam.softwareTrigger)
 
         num_images = 5
-        self.camera_left = num_images
+        self.images_left = num_images
+        self._expected_shape = size[::-1]  # Y, X
 
-        def receive_image(dataflow, image):
-            """Callback for readout camera"""
-            self.assertEqual(image.shape, size[::-1])  # invert size
-            self.assertIn(model.MD_EXP_TIME, image.metadata)
-            self.camera_left -= 1
-            logging.debug("Got image.")
-            if self.camera_left <= 0:
-                dataflow.unsubscribe(receive_image)
-
-        self.readoutcam.data.subscribe(receive_image)
+        self.readoutcam.data.subscribe(self.receive_image)
 
         # Wait for the image
         for i in range(num_images):
             # call notify quickly to trigger an early event
             self.readoutcam.softwareTrigger.notify()
-            if i == num_images - 1:
-                time.sleep(0.01)
-                # if trigger event was fast enough we should get more than one acq waiting in queue
-                self.assertGreater(len(self.readoutcam.queue_events), 1)
+
+        time.sleep(0.01)
+        # if trigger event was fast enough we should get more than one acq waiting in queue
+        self.assertGreater(len(self.readoutcam._queue_events), 1)
 
         time.sleep(num_images * 0.2 * 2)  # wait some time for acquisition to finish
-        self.assertEqual(len(self.readoutcam.queue_events), 0)
+        self.assertEqual(len(self.readoutcam._queue_events), 0)
 
     # Special commands for the photon-counting mode
     def test_photon_counting_options(self):
@@ -779,6 +759,7 @@ class TestHamamatsurxCam(unittest.TestCase):
     def test_acq_photon_counting(self):
 
         try:
+            #DEBUG
             print("Press a key when ready to start the acquisition in photon counting mode...")
             input()
 

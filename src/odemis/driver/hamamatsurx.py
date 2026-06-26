@@ -68,11 +68,21 @@ DELAY_NAMES = {
     "Delay H": "delayH",
 }
 
-# Commands that can be passed to queue_img (which also accepts a list to indicate an image is ready)
+# Commands that can be passed to queue_img as Tuple[CMD_*, ...].
+# For CMD_IMG, the extra elements are the image event arguments (previously passed as a list).
+# For all other commands, no extra arguments are passed.
 CMD_QUIT = "Q"
-CMD_FLUSH = "F"
+CMD_STOP = "F"
 CMD_SW_TRIGGER = "T"
+CMD_IMG = "I"
+CMD_START = "S"
 
+
+class TerminationRequested(Exception):
+    """
+    Acquisition thread termination requested.
+    """
+    pass
 
 class RemoteExError(IOError):
     def __init__(self, errno, *args, **kwargs):
@@ -225,11 +235,11 @@ class ReadoutCamera(model.DigitalCamera):
         self._sync_event = None
         self.softwareTrigger = model.Event()
         # queue events starting an acquisition (advantageous when event.notify is called very fast)
-        self.queue_events = collections.deque()
+        self._queue_events = collections.deque()
         self._acq_sync_lock = threading.Lock()
 
         self.t_image = None  # thread for reading images from the RingBuffer
-        self._update_monitor_mode(self.photonCounting.value)
+        self._update_monitor_mode(False, self.photonCounting.value)
 
         self.data = StreakCameraDataFlow(self._start, self._stop, self._sync)
 
@@ -241,8 +251,14 @@ class ReadoutCamera(model.DigitalCamera):
 
         # terminate image thread
         if self.t_image and self.t_image.is_alive():
-            self.parent.queue_img.put(CMD_QUIT)  # Special message to request end of the thread
+            self.parent.queue_img.put((CMD_QUIT,))  # Special message to request end of the thread
             self.t_image.join(5)
+
+        # Just in case the acquisition thread failed, directly stop the acquisition
+        try:
+            self.parent.AcqStop()
+        except Exception:
+            pass
 
         super().terminate()
 
@@ -356,10 +372,6 @@ class ReadoutCamera(model.DigitalCamera):
             # We could support it, but it's a lot of extra complexity to the code, and in reality, never used.
             logging.warning("Photon-counting mode changed to %s while acquiring: not supported", value)
 
-        # Activating the photon-counting actually consist in starting the acquisition in a different
-        # mode.
-        self._update_monitor_mode(value)
-
         # On HPDTA, the exposure time is different setting in photon-counting mode. Typically, in
         # photon-counting mode, a very short exposure time is used.
         # TODO: To make it easier for the user, automatically read the exposure time corresponding
@@ -456,22 +468,26 @@ class ReadoutCamera(model.DigitalCamera):
 
         return value
 
-    def _update_monitor_mode(self, photo_counting: bool) -> None:
+    def _update_monitor_mode(self, active: bool, photon_counting: bool) -> None:
         """
         Update the image monitoring mode of HPDTA, to receive the correct image, depending on the
         acquisition mode.
-        :param photo_counting: (bool) True if photon-counting mode is enabled, False otherwise
+        :param photon_counting: (bool) True if photon-counting mode is enabled, False otherwise
         """
-        if photo_counting:
-            # Receive the final image, once the acquisition stops.
-            # In photon-counting, the intermediary images are not useful. We acquire one image
-            # at a time.
-            self.parent.AcqLiveMonitor("Off")
-            self.parent.AcqAcqMonitor("EndAcq")
+        if active:
+            if photon_counting:
+                # Receive the final image, once the acquisition stops.
+                # In photon-counting, the intermediary images are not useful. We acquire one image
+                # at a time.
+                self.parent.AcqLiveMonitor("Off")
+                self.parent.AcqAcqMonitor("EndAcq")
+            else:
+                # For standard mode, use the "live" mode to get a fluid image.
+                # The last image is the same as the latest from the ring buffer, so we don't need it.
+                self.parent.AcqLiveMonitor("RingBuffer", nbBuffers=3)
+                self.parent.AcqAcqMonitor("Off")
         else:
-            # For standard mode, use the "live" mode to get a fluid image.
-            # The last image is the same as the latest from the ring buffer, so we don't need it.
-            self.parent.AcqLiveMonitor("RingBuffer", nbBuffers=3)
+            self.parent.AcqLiveMonitor("Off")
             self.parent.AcqAcqMonitor("Off")
 
     def _start(self):
@@ -482,18 +498,10 @@ class ReadoutCamera(model.DigitalCamera):
         if not self.t_image or not self.t_image.is_alive():
             # start acquisition thread, which waits for monitor messages that indicate an image
             # is available.
-            self.t_image = threading.Thread(target=self._getDataFromBuffer)
+            self.t_image = threading.Thread(target=self._acquire)
             self.t_image.start()
 
-        # Note: no function to get current acqMode.
-        # Note: Acquisition mode, needs to be before exposureTime!  (Note: probably incorrect statement!)
-
-        # If no synchronization => immediately start the acquisition
-        if self._sync_event is None:
-            if self.photonCounting.value:
-                self.parent.StartAcquisition("PC")
-            else:
-                self.parent.StartAcquisition("Live")
+        self.parent.queue_img.put((CMD_START,))
 
         # Force trigger rate reading
         try:
@@ -512,8 +520,7 @@ class ReadoutCamera(model.DigitalCamera):
         """
         Stop the acquisition.
         """
-        self.parent.AcqStop()
-        self.parent.queue_img.put(CMD_FLUSH)  # Flush, to stop reading all images still in the ring buffer
+        self.parent.queue_img.put((CMD_STOP,))
         # Note: set MCPGain to zero after acquiring for HW safety reasons
         self.parent._streakunit.MCPGain.value = 0
 
@@ -547,8 +554,8 @@ class ReadoutCamera(model.DigitalCamera):
         Called by the Event when it is triggered  (e.g. self.softwareTrigger.notify()).
         """
         logging.debug("Event triggered to start a new synchronized acquisition.")
-        self.queue_events.append(time.time())
-        self.parent.queue_img.put(CMD_SW_TRIGGER)
+        self._queue_events.append(time.time())
+        self.parent.queue_img.put((CMD_SW_TRIGGER,))
 
     # override
     def updateMetadata(self, md):
@@ -603,7 +610,74 @@ class ReadoutCamera(model.DigitalCamera):
 
         return table
 
-    def _getDataFromBuffer(self):
+    def _get_acq_msg(self, **kwargs) -> Tuple[str, ...]:
+        """
+        Read one message from the acquisition queue
+        :return: message
+        :raises queue.Empty: if no message on the queue
+        :raise TerminationRequested: if CMD_QUIT is received
+        """
+        while True:
+            cmd, *args = self.parent.queue_img.get(**kwargs)
+            if cmd in (CMD_START, CMD_SW_TRIGGER, CMD_STOP, CMD_SW_TRIGGER, CMD_IMG, CMD_QUIT):
+                logging.debug("Acq received message %s", cmd)
+                break
+            else:
+                logging.warning("Acq received unexpected message %s, skipping", cmd)
+                # wait for a new message
+
+        if cmd == CMD_QUIT:
+            raise TerminationRequested()
+
+        return (cmd, *args)
+
+    def _acquire(self):
+        """
+        Acquisition thread. Runs all the time, until receive a GEN_QUIT message.
+        Managed via the .queue_img queue, by passing CMD_* messages.
+        """
+        try:
+            while True: # Waiting/Acquiring loop
+                # Wait until we have a start (or terminate) message
+                photon_counting = self._acq_wait_start()
+
+                # acquisition loop (until stop requested)
+                self._acquire_images(photon_counting)
+
+        except TerminationRequested:
+            logging.debug("Acquisition thread requested to terminate")
+        except Exception:
+            logging.exception("Failure in acquisition thread")
+
+        logging.debug("Acquisition thread ended")
+
+    def _acq_wait_start(self) -> bool:
+        """
+        Blocks until the acquisition should start.
+        It flushes the previous CMD_IMG (monitor) messages too.
+        Note: it expects that the acquisition is stopped.
+        raise TerminationRequested: if a terminate message was received
+        """
+        while True:
+            cmd, *args = self._get_acq_msg(block=True)
+            if cmd == CMD_START:
+                logging.debug("Acquisition started")
+                break
+            # Either a (duplicated) Stop or a trigger => we don't care
+            logging.debug("Skipped message %s as acquisition is stopped", cmd)
+
+        # Not synchronized => start immediately
+        photon_counting = self.photonCounting.value
+        self._update_monitor_mode(active=True, photon_counting=photon_counting)
+        if not self._sync_event:
+            if photon_counting:
+                self.parent.StartAcquisition("PC")
+            else:
+                self.parent.StartAcquisition("Live")
+
+        return photon_counting
+
+    def _acquire_images(self, photon_counting: bool):
         """
         This method runs in a separate thread and waits for messages in queue indicating
         that some data was received. The image is then received from the device via the dataport IP socket or
@@ -611,12 +685,9 @@ class ReadoutCamera(model.DigitalCamera):
         It corrects the vertical time information. The table contains the actual timestamps for each px.
         The camera should already be prepared with a RingBuffer.
         """
-        logging.debug("Starting data thread.")
-        # FIXME: check if anything breaks when this is removed
-        #time.sleep(0.1)  # TODO: why? => Document.
+        logging.debug("Starting data reception.")
 
         is_receiving_image = False  # used during synchronised acquisition
-
         try:
             while True:
                 # In synchronized mode, with previous image received => need to wait for next trigger
@@ -634,11 +705,11 @@ class ReadoutCamera(model.DigitalCamera):
 
                     # Start next acquisition, if a trigger event was received.
                     # This handles all the cases (event delayed or not), because the message wait
-                    # function gets a trigger event, it jumps back to thee beginning of this while loop.
+                    # function gets a trigger event, it jumps back to the beginning of this while loop.
                     try:
-                        event_time = self.queue_events.popleft()
+                        event_time = self._queue_events.popleft()
                         logging.warning("Starting acquisition delayed by %g s.", time.time() - event_time)
-                        if self.photonCounting.value:
+                        if photon_counting:
                             self.parent.StartAcquisition("PC")
                         else:
                             self.parent.AcqStart("SingleLive")
@@ -648,7 +719,7 @@ class ReadoutCamera(model.DigitalCamera):
                         pass
 
                 if self._sync_event and is_receiving_image:
-                    if self.photonCounting.value:
+                    if photon_counting:
                         acq_time = self.exposureTime.value * self.integrationCounts.value
                     else:
                         acq_time = self.exposureTime.value
@@ -657,68 +728,60 @@ class ReadoutCamera(model.DigitalCamera):
                 else:
                     timeout = None
 
+                # Check for the communication queue:
+                # * (CMD_IMG, *args) -> monitor message from HPDTA = a new image is available
+                # * (CMD_*,) -> from the Odemis backend, to report a change in acqusition, or trigger event
                 try:
-                    # Check for the communication queue:
-                    # * list[str] -> monitor message from HPDTA = a new image is available
-                    # * CMD_* (ie, str) -> from the Odemis backend, to report a new trigger even,
-                    #   request a flush, or stop the thread.
-                    message = self.parent.queue_img.get(block=True, timeout=timeout)  # block until receive something
+                    cmd, *args = self._get_acq_msg(block=True, timeout=timeout)
                 except queue.Empty:
                     logging.warning("Failed to receive image from streak ccd. Timed out after %f s. Will try again.",
                                     timeout)
                     is_receiving_image = False
                     continue
 
-                logging.debug("Received img message %s", message)
-
-                only_flush = False
-                if message == CMD_QUIT:  # end the thread
-                    return
-                elif message == CMD_SW_TRIGGER:
+                if cmd == CMD_SW_TRIGGER:
                     if not self._sync_event:
                         logging.warning("Received a trigger event, but no sync event is set. Ignoring.")
                     else:
                         logging.info("Received event trigger")
                     continue
-                elif message == CMD_FLUSH:
-                    only_flush = True
-                    logging.info("Received flush command, will flush previous images.")
-                elif isinstance(message, list):  # info from the HPDTA image monitor
-                    rargs = message
+                elif cmd == CMD_STOP:
+                    return
+                elif cmd == CMD_IMG:  # info from the HPDTA image monitor
+                    rargs = args
                 else:
-                    logging.warning("Received unknown message %s from queue_img, skipping.", message)
+                    logging.warning("Received unknown command %s from queue_img, skipping.", cmd)
                     continue
 
                 # If live mode, and multiple images are in the queue, flush all but the last one
-                if not self._sync_event or only_flush:
-                    while not self.parent.queue_img.empty():
+                if not self._sync_event:
+                    while True:
                         # keep reading to check if there might be a newer image for display
                         # in case we are too slow with reading
-                        message = self.parent.queue_img.get(block=False)
+                        try:
+                            cmd, *args = self._get_acq_msg(block=False)
+                        except queue.Empty:
+                            break  # no more images in queue
 
-                        if message == CMD_QUIT:  # end the thread
-                            return
-                        elif message == CMD_SW_TRIGGER:
+                        if cmd == CMD_START:
+                            logging.debug("Received start command, but acquisition already started. Ignoring.")
+                            continue  # ignore, acquisition was already started
+                        elif cmd == CMD_SW_TRIGGER:
                             logging.warning("Received a trigger event, but no sync event is set. Ignoring.")
                             continue
-                        elif message == CMD_FLUSH:
-                            only_flush = True
+                        elif cmd == CMD_STOP:
                             logging.info("Received flush command, will flush previous images.")
-                        elif isinstance(message, list):  # info from the HPDTA image monitor
+                        elif cmd == CMD_IMG:  # info from the HPDTA image monitor
                             logging.debug("Discarding previous image")
-                            rargs = message
+                            rargs = args
                         else:
-                            logging.warning("Received unknown message %s from queue_img, skipping.",
-                                            message)
+                            logging.warning("Received unknown command %s from queue_img, skipping.",
+                                            cmd)
                             continue
-                    logging.info("No more images in queue, will read the last one.")
-
-                if only_flush:  # Flush => the previous images are from the previous acquisition
-                    logging.debug("Previous images flushed.")
-                    continue
+                    logging.info("No more images in queue, will read the latest one.")
 
                 try:
-                    image = self._get_image(rargs)  # get the image and metadata from the buffer
+                    image = self._get_image(rargs, photon_counting)  # get the image and metadata from the buffer
                     self.data.notify(image)  # send to the listeners of the DataFlow
                 except (OSError, TimeoutError) as ex:
                     logging.warning("Failed to receive image: %s", ex)
@@ -727,15 +790,14 @@ class ReadoutCamera(model.DigitalCamera):
 
                 # Photon-counting mode always only acquire a single image, so if no synchronization
                 # is used, we need to start a new acquisition
-                if self.photonCounting.value and not self._sync_event:
+                if photon_counting and not self._sync_event:
                     self.parent.StartAcquisition("PC")
 
-        except Exception:
-            logging.exception("Readout camera data thread failed.")
         finally:
-            logging.info("Readout camera data thread ended.")
+            self.parent.AcqStop()
+            self._update_monitor_mode(active=False, photon_counting=False)
 
-    def _get_image(self, event_args: List[str]) -> model.DataArray:
+    def _get_image(self, event_args: List[str], photon_counting: bool) -> model.DataArray:
         """
         Receive an image corresponding to the monitor event from HPDTA
         :param event_args: monitor event information, as received from HPDTA
@@ -799,7 +861,7 @@ class ReadoutCamera(model.DigitalCamera):
             self._metadata.pop(model.MD_TIME_LIST, None)
 
         md = dict(self._metadata)  # make a copy of md dict so cannot be accidentally changed
-        if self.photonCounting.value:
+        if photon_counting:
             # Save the extra metadata for photon-counting mode.
             # Don't trust .integrationCounts & .exposureTime too much, as the user might have changed in HPDTA
             try:
@@ -1466,7 +1528,7 @@ class StreakCamera(model.HwComponent):
         # log messages (error_code = 4,5) from commandport
         self.queue_log = []  # List[str], to hold the latest log messages (error codes 4 & 5)
         # Communication with the acquisition thread:
-        self.queue_img = queue.Queue(maxsize=0)  # CMD_* or a list[str] to indicate a new image is available
+        self.queue_img = queue.Queue(maxsize=0)  # Tuple[CMD_*, ...] where extra elements are command arguments
 
         self.should_listen = True  # used in readCommandResponse thread
 
@@ -1684,7 +1746,7 @@ class StreakCamera(model.HwComponent):
         This method runs in a separate thread and continuously listens for messages returned from
         the device via the commandport IP socket.
         The messages are made available either on .queue_command_responses (for the standard responses)
-        or .queue_img (for messages related to the images).
+        or .queue_img (for messages related to the images, as Tuple[CMD_*, ...]).
         """
         try:
             responses = ""  # received data not yet processed
@@ -1748,7 +1810,7 @@ class StreakCamera(model.HwComponent):
                     if error_code in (4, 5):
                         # A new image is available on the dataport => Send to the special queue
                         if error_code == 4 and rfunc in ("Livemonitor", "Acqmonitor"):
-                            self.queue_img.put(rargs)
+                            self.queue_img.put((CMD_IMG, *rargs))
                         else:
                             self.queue_log.append(msg_splitted)
                             if len(self.queue_log) > LOG_QUEUE_MAX_SIZE:

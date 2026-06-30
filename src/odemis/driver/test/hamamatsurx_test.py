@@ -353,7 +353,7 @@ class TestHamamatsurxCam(unittest.TestCase):
         self.readoutcam.exposureTime.value = 0.1  # 100ms
         prev_exp = self.readoutcam.exposureTime.value
         # change exposureTime VA
-        self.readoutcam.exposureTime.value = 0.001  # 1ms
+        self.readoutcam.exposureTime.value = 0.01  # 10ms
         cur_exp = self.readoutcam.exposureTime.value
         # check previous and current value are not the same
         self.assertNotEqual(prev_exp, cur_exp)
@@ -715,8 +715,6 @@ class TestHamamatsurxCam(unittest.TestCase):
 
         # Note: async commands are: AcqStart, SeqStart, SeqSave, SeqLoad
 
-        # self.readoutcam.data.get()
-
         # Use a relatively long exposure time, to make sure we can send events faster than the frame rate.
         self.readoutcam.exposureTime.value = 0.2
         self.streakunit.timeRange.value = util.find_closest(0.000001, self.streakunit.timeRange.choices)
@@ -739,29 +737,15 @@ class TestHamamatsurxCam(unittest.TestCase):
         # if trigger event was fast enough we should get more than one acq waiting in queue
         self.assertGreater(len(self.readoutcam._queue_events), 1)
 
-        time.sleep(num_images * 0.2 * 2)  # wait some time for acquisition to finish
+        time.sleep(num_images * 0.2 * 2 + 1)  # wait some time for acquisition to finish
         self.assertEqual(len(self.readoutcam._queue_events), 0)
-
-    # Special commands for the photon-counting mode
-    def test_photon_counting_options(self):
-        dev = self.streakcam
-        param_names = dev.CamParamsList("PC")
-        for name in param_names:
-            vals = dev.CamParamGet("PC", name)
-            infos = dev.CamParamInfoEx("PC", name)
-            print(f"Param {name} has value {vals}: {infos}")
-
-        param_names = dev.AcqParamsList()
-        for name in param_names:
-            vals = dev.AcqParamInfoEx(name)
-            print(f"Acq Param {name} has value {vals}")
 
     def test_acq_photon_counting(self):
 
         try:
             #DEBUG
-            print("Press a key when ready to start the acquisition in photon counting mode...")
-            input()
+            #print("Press a key when ready to start the acquisition in photon counting mode...")
+            #input()
 
             dev = self.streakcam
             exp_time = dev.CamParamGet("PC", "Exposure")

@@ -239,7 +239,7 @@ class ReadoutCamera(model.DigitalCamera):
         self._acq_sync_lock = threading.Lock()
 
         self.t_image = None  # thread for reading images from the RingBuffer
-        self._update_monitor_mode(False, self.photonCounting.value)
+        self._update_monitor_mode(False)
 
         self.data = StreakCameraDataFlow(self._start, self._stop, self._sync)
 
@@ -316,9 +316,10 @@ class ReadoutCamera(model.DigitalCamera):
         # If camera is acquiring, it is essential to stop cam first and then change binning.
         # Currently, this only affects the Alignment tab, where camera is continuously acquiring.
         if self.data.active:  # Note: not thread save -> change # TODO use update_settings()
+            self._stop()
             self.parent.AcqStop()
             self.parent.CamParamSet("Setup", "Binning", binning)
-            self.parent.StartAcquisition("Live")
+            self._start()
         else:
             self.parent.CamParamSet("Setup", "Binning", binning)
 
@@ -414,33 +415,6 @@ class ReadoutCamera(model.DigitalCamera):
 
         return exp_time
 
-    def _get_exposure_count(self) -> int:
-        """
-        Reads the current exposure count from the camera, in photon-counting mode.
-        """
-        count = self.parent.CamParamGet("PC", "NrExposures")
-        return int(count[0])
-
-    def _get_exposure_count_range(self) -> Tuple[int, int]:
-        """
-        Get min and max values for the camera exposure count, in photon-counting mode.
-        :return: tuple containing min and max exposure count
-        """
-        count_info = self.parent.CamParamInfoEx("PC", "NrExposures")
-        min_value = int(count_info[3])
-        max_value = int(count_info[4])
-
-        return min_value, max_value
-
-    def _set_exposure_count(self, count: int) -> int:
-        """
-        Sets the exposure count for the camera, in photon-counting mode.
-        :param count: requested exposure count
-        :return: actual exposure count
-        """
-        self.parent.CamParamSet("PC", "NrExposures", str(count))
-        return count
-
     def _setCamExpTime(self, value: float) -> float:
         """
         Set the camera exposure time.
@@ -468,10 +442,38 @@ class ReadoutCamera(model.DigitalCamera):
 
         return value
 
-    def _update_monitor_mode(self, active: bool, photon_counting: bool) -> None:
+    def _get_exposure_count(self) -> int:
+        """
+        Reads the current exposure count from the camera, in photon-counting mode.
+        """
+        count = self.parent.CamParamGet("PC", "NrExposures")
+        return int(count[0])
+
+    def _get_exposure_count_range(self) -> Tuple[int, int]:
+        """
+        Get min and max values for the camera exposure count, in photon-counting mode.
+        :return: tuple containing min and max exposure count
+        """
+        count_info = self.parent.CamParamInfoEx("PC", "NrExposures")
+        min_value = int(count_info[3])
+        max_value = int(count_info[4])
+
+        return min_value, max_value
+
+    def _set_exposure_count(self, count: int) -> int:
+        """
+        Sets the exposure count for the camera, in photon-counting mode.
+        :param count: requested exposure count
+        :return: actual exposure count
+        """
+        self.parent.CamParamSet("PC", "NrExposures", str(count))
+        return count
+
+    def _update_monitor_mode(self, active: bool, photon_counting: bool = False) -> None:
         """
         Update the image monitoring mode of HPDTA, to receive the correct image, depending on the
         acquisition mode.
+        :param active: (bool) True if acquisition is active, False otherwise
         :param photon_counting: (bool) True if photon-counting mode is enabled, False otherwise
         """
         if active:
@@ -687,6 +689,12 @@ class ReadoutCamera(model.DigitalCamera):
         """
         logging.debug("Starting data reception.")
 
+        # TODO: handle changing synchronization while acquiring. It could be done by sending
+        # a CMD message to report that the synchronization has changed. Currently changing the
+        # synchronization during, or even just after stopping a photon-counting acqusition can
+        # end-up with a long time (~10s) for the thread to catch up with the state.
+        # TODO: handle settings change during the acquisition. See the binning change hack. This
+        # could be done by (yet again) another CMD message to report that the settings have changed.
         is_receiving_image = False  # used during synchronised acquisition
         try:
             while True:
@@ -697,8 +705,9 @@ class ReadoutCamera(model.DigitalCamera):
                     start = time.time()
                     while int(self.parent.AsyncCommandStatus()[0]):
                         time.sleep(1e-3)
-                        logging.debug("Asynchronous RemoteEx command still in process. Wait until finished.")
                         if time.time() > start + timeout:
+                            logging.info("Asynchronous RemoteEx command still in process after %g s. "
+                                         "Stopping acquisition to reset state.", timeout)
                             # most likely camera is in live-mode, so stop camera, and wait a bit more
                             self.parent.AcqStop()
                             start = time.time()
@@ -710,7 +719,7 @@ class ReadoutCamera(model.DigitalCamera):
                         event_time = self._queue_events.popleft()
                         logging.warning("Starting acquisition delayed by %g s.", time.time() - event_time)
                         if photon_counting:
-                            self.parent.StartAcquisition("PC")
+                            self.parent.AcqStart("PC")
                         else:
                             self.parent.AcqStart("SingleLive")
                         is_receiving_image = True
@@ -770,7 +779,7 @@ class ReadoutCamera(model.DigitalCamera):
                             logging.warning("Received a trigger event, but no sync event is set. Ignoring.")
                             continue
                         elif cmd == CMD_STOP:
-                            logging.info("Received flush command, will flush previous images.")
+                            return
                         elif cmd == CMD_IMG:  # info from the HPDTA image monitor
                             logging.debug("Discarding previous image")
                             rargs = args
@@ -795,7 +804,7 @@ class ReadoutCamera(model.DigitalCamera):
 
         finally:
             self.parent.AcqStop()
-            self._update_monitor_mode(active=False, photon_counting=False)
+            self._update_monitor_mode(active=False)
 
     def _get_image(self, event_args: List[str], photon_counting: bool) -> model.DataArray:
         """
@@ -907,7 +916,7 @@ class StreakUnit(model.HwComponent):
 
         # Set default "good" parameters, which are not controlled/changed afterward.
         # There are several types of streak unit (eg, single sweep, synchroscan).
-        # Synchroscan:  DevParamsList 'Time Range', 'Mode', 'Gate Mode', 'MCP Gain', 'Delay'
+        # Synchroscan:  DevParamsList 'Time Range', 'Mode', 'Gate Mode', 'MCP Gain', 'Shutter', 'FocusTimeOver', 'Delay'
         # Single Sweep: DevParamsList 'Time Range', 'Mode', 'Gate Mode', 'MCP Gain', 'Shutter', 'Trig. Mode', 'Trigger status', 'Trig. level', 'Trig. slope', 'FocusTimeOver'
         # In order to support all of them we need to check the available parameters.
         parent.DevParamSet(self.location, "MCP Gain", 0)
@@ -1840,9 +1849,9 @@ class StreakCamera(model.HwComponent):
             start = time.time()
             timeout = 5
             while int(self.AsyncCommandStatus()[0]):
-                time.sleep(0)
+                time.sleep(1e-3)
                 if time.time() > start + timeout:
-                    logging.error("Could not start acquisition.")
+                    logging.error("Could not start acquisition, HPDTA still processing command.")
                     return
             self.AcqStart(AcqMode)
 
@@ -2858,9 +2867,9 @@ class HPDTASim:
         self._su_mode = "Focus"
         self._su_mcp_gain = 0
         self._su_gate_mode = "Normal"
+        self._su_shutter = "Closed"
         if streak_unit == "singlesweep":
             self._su_time_range = "1 ns"
-            self._su_shutter = "Closed"
             self._su_trig_mode = "Cont"
             self._su_trig_level = 1.0
             self._su_trig_slope = "Rising"
@@ -2904,6 +2913,9 @@ class HPDTASim:
         # Acquisition background thread
         self._acq_thread = None
         self._acq_lock = threading.Lock()
+
+        # Time until which AsyncCommandStatus should report a pending task (0 = no pending task)
+        self._task_end_t = 0
 
         self._cmd_server = _HPDTAServer(self, ("localhost", port), _HPDTACommandHandler)
         self._data_server = _HPDTAServer(self, ("localhost", self.port_d), _HPDTADataHandler)
@@ -2966,14 +2978,14 @@ class HPDTASim:
         * Focus mode (not Operate), shutter open: Gaussian peak confined to the
           centre horizontal line only (simulates the focused beam visible in Focus
           mode without time-sweeping).
-        * Shutter closed (singlesweep only): flat background with noise.
+        * Shutter closed: flat background with noise.
 
         :return: raw bytes of a uint16 image in row-major (C) order, shape (VWidth, HWidth)
         """
         h = self._get_vwidth()
         w = self._get_hwidth()
 
-        shutter_closed = (self.streak_unit == "singlesweep" and self._su_shutter == "Closed")
+        shutter_closed = (self._su_shutter == "Closed")
 
         x_idx = numpy.arange(w, dtype=numpy.float32).reshape(1, -1)
         center_col = w / 2.0
@@ -3359,7 +3371,10 @@ class _HPDTACommandHandler(socketserver.BaseRequestHandler):
             self._send_response(func, "1", "1", "0", "0", "0", "0")
 
         elif fl == "asynccommandstatus":
-            self._send_response(func, "0", "0", "0")
+            if time.time() < sim._task_end_t:
+                self._send_response(func, "1", "0", "1")
+            else:
+                self._send_response(func, "0", "0", "0")
 
         elif fl == "stop" or fl == "shutdown":
             self._send_response(func)
@@ -3367,6 +3382,7 @@ class _HPDTACommandHandler(socketserver.BaseRequestHandler):
         # Acquisition
         elif fl == "acqstart":
             mode = args[0] if args else "Live"
+            sim._task_end_t = time.time() + 0.1
             sim._start_acquisition(mode, self.request, self._send_lock)
             self._send_response(func)
 
@@ -3722,7 +3738,7 @@ class _HPDTACommandHandler(socketserver.BaseRequestHandler):
             self._send_response(func, sim._su_time_range)
         elif pl == "gatemode":
             self._send_response(func, sim._su_gate_mode)
-        elif pl == "shutter" and sim.streak_unit == "singlesweep":
+        elif pl == "shutter":
             self._send_response(func, sim._su_shutter)
         elif pl == "trigmode" and sim.streak_unit == "singlesweep":
             self._send_response(func, sim._su_trig_mode)
@@ -3970,7 +3986,7 @@ class _HPDTACommandHandler(socketserver.BaseRequestHandler):
                     "Trig. level", "Trig. slope", "FocusTimeOver",
                 ]
             else:
-                params = ["Time Range", "Mode", "Gate Mode", "MCP Gain", "Delay"]
+                params = ["Time Range", "Mode", "Gate Mode", "MCP Gain", "Delay","Shutter"]
         elif device in ("del", "delay", "delaybox", "del1"):
             if sim.streak_unit == "singlesweep":
                 params = [

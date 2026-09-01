@@ -59,7 +59,7 @@ from odemis.acq.stream import (
     SpectrumStream,
     Stream,
     executeAsyncTask,
-    util,
+    util, MonochromatorSettingsStream,
 )
 from odemis.model import DataArray
 from odemis.util import dataio as udataio
@@ -607,7 +607,7 @@ class TiledAcquisitionTask(object):
                 px *= s.repetition.value[0] * s.repetition.value[1]
 
             return px
-        elif isinstance(s, (ARStream, SpectrumStream)):
+        elif isinstance(s, (ARStream, SpectrumStream, MonochromatorSettingsStream)):
             # Temporarily reports 0 px, as we don't stitch these streams for now
             return 0
 

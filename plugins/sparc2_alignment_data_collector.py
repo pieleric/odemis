@@ -250,7 +250,7 @@ class AlignmentDataCollectorDialog(wx.Dialog):
 
         hbox = wx.BoxSizer(wx.HORIZONTAL)
         hbox.Add(lbl_ctrl, flag=wx.ALL | wx.ALIGN_CENTER_VERTICAL, border=5)
-        hbox.Add(path_display, 1, flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL, border=5)
+        hbox.Add(path_display, 1, flag=wx.EXPAND, border=5)
         hbox.Add(browse_button, flag=wx.LEFT | wx.ALIGN_CENTER_VERTICAL, border=5)
 
         sizer.Add(hbox, flag=wx.ALL | wx.EXPAND, border=5)

@@ -1288,7 +1288,7 @@ class StreamController(object):
 
             fit = fluo.estimate_fit_to_dye(wl, band)
             # Update colour
-            colour = {fluo.FIT_GOOD: theme.text_muted,
+            colour = {fluo.FIT_GOOD: theme.text_disabled,
                       fluo.FIT_BAD: theme.text_warning,
                       fluo.FIT_IMPOSSIBLE: theme.text_error}[fit]
             lbl_ctrl.SetForegroundColour(colour)

@@ -1247,14 +1247,15 @@ class StreamPanel(wx.Panel):
 
             exc_sizer.Add(hw_set, 1, border=5, flag=wx.ALL | wx.ALIGN_CENTRE_VERTICAL)
 
-        # Label for peak information
+        # # Label for peak information
         lbl_peak = wx.StaticText(self._panel)
-        exc_sizer.Add(lbl_peak, 1, border=5, flag=wx.ALL | wx.ALIGN_CENTRE_VERTICAL | wx.ALIGN_LEFT)
+        # exc_sizer.Add(lbl_peak, 1, border=5, flag=wx.ALL | wx.ALIGN_CENTRE_VERTICAL | wx.ALIGN_LEFT)
+        exc_sizer.Add(lbl_peak, 1, border=5, flag=wx.RIGHT | wx.ALIGN_CENTRE_VERTICAL)
 
         if center_wl_color:
             # A button, but not clickable, just to show the wavelength
             # If a dye is selected, the colour of the peak is used, otherwise we
-            # use the hardware setting
+            # use the hardware
             btn_color = buttons.ColourButton(self._panel, -1, colour=center_wl_color,
                                               size=(18, 18))
             self.gb_sizer.Add(btn_color,

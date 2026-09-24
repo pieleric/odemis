@@ -203,15 +203,15 @@ class StreamController(object):
             self.stream.zIndex.subscribe(self._on_z_index)
             self.tab_data_model.zPos.subscribe(self._on_z_pos, init=True)
 
-        if hasattr(stream, "zIndex") and hasattr(stream, "max_projection"):
-            # Disable the z-index control when MIP is enabled
-            for se in self.entries:
-                if se.vigilattr is self.stream.zIndex:
-                    self._zindex_se = se
-                    self.stream.max_projection.subscribe(self._on_max_projection, init=True)
-                    break
-            else:
-                logging.warning("Stream has zIndex but no corresponding stream entry found.")
+        # if hasattr(stream, "zIndex") and hasattr(stream, "max_projection"):
+        #     # Disable the z-index control when MIP is enabled
+        #     for se in self.entries:
+        #         if se.vigilattr is self.stream.zIndex:
+        #             self._zindex_se = se
+        #             self.stream.max_projection.subscribe(self._on_max_projection, init=True)
+        #             break
+        #     else:
+        #         logging.warning("Stream has zIndex but no corresponding stream entry found.")
 
         # For Temporal Spectrum streams, with a photon counting mode, show/hide the exposure time controls
         if hasattr(stream, "detPhotonCounting"):
@@ -917,7 +917,7 @@ class StreamController(object):
             self.stream_panel.header_change_callback = self._on_new_dye_name
 
         center_wl = fluo.get_one_center_ex(self.stream.excitation.value, self.stream.emission.value)
-        self._add_excitation_ctrl(wavelength2rgb(center_wl))
+        # self._add_excitation_ctrl(wavelength2rgb(center_wl))
 
         # Emission
         center_wl = fluo.get_one_center_em(self.stream.emission.value, self.stream.excitation.value)

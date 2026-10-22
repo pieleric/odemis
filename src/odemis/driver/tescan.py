@@ -1978,9 +1978,10 @@ class ChamberView(model.DigitalCamera):
         """
         # "if" is to not wait if it's already finished
         if self.acquire_must_stop.is_set():
-            self.acquire_thread.join(10)  # 10s timeout for safety
-            if self.acquire_thread.is_alive():
-                raise OSError("Failed to stop the acquisition thread")
+            if self.acquire_thread is not None:
+                self.acquire_thread.join(10)  # 10s timeout for safety
+                if self.acquire_thread.is_alive():
+                    raise OSError("Failed to stop the acquisition thread")
             # ensure it's not set, even if the thread died prematurely
             self.acquire_must_stop.clear()
 
@@ -2085,7 +2086,7 @@ class ChamberPressure(model.Actuator):
 
         # convert into an absolute move
         pos = {}
-        for a, v in shift.items:
+        for a, v in shift.items():
             pos[a] = self.position.value[a] + v
 
         return self.moveAbs(pos)
@@ -2097,12 +2098,12 @@ class ChamberPressure(model.Actuator):
         self._checkMoveAbs(pos)
         return self._executor.submit(self._changePressure, pos["vacuum"])
 
-    def _changePressure(self, p):
+    def _changePressure(self, pressure: float):
         """
         Synchronous change of the pressure
-        p (float): target pressure
+        :param pressure: target pressure
         """
-        if p["vacuum"] == PRESSURE_VENTED:
+        if pressure == PRESSURE_VENTED:
             self.parent._device_handler.VacVent()
         else:
             self.parent._device_handler.VacPump()
@@ -2113,7 +2114,7 @@ class ChamberPressure(model.Actuator):
                 raise TimeoutError("Vacuum action timed out")
             # Update chamber pressure until pumping/venting process is done
             self._updatePosition()
-        self._position = p
+        self._position = pressure
         self._updatePosition()
 
     def stop(self, axes=None):

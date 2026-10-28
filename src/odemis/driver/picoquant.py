@@ -2546,7 +2546,7 @@ class RawDetector(model.Detector):
 
 
 class BasicDataFlow(model.DataFlow):
-    def __init__(self, detector: PicoBase):
+    def __init__(self, detector: model.Detector):
         """
         detector: the detector that the dataflow corresponds to
         """

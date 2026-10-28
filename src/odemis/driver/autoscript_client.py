@@ -92,11 +92,10 @@ msgpack_numpy_file: {msgpack_numpy.__file__},
 msgpack version: {pkg_resources.get_distribution('msgpack').version}
 msgpack_file: {msgpack.__file__}
 
-This is likely a dependencies issue:
-make sure you have the following matching versions of msgpack and msgpack-numpy installed:
+Make sure you have the following matching versions of msgpack and msgpack-numpy installed:
 msgpack==0.5.6, msgpack-numpy==0.4.4
 or
-msgpack==1.0.3 msgpack-numpy==0.4.8
+msgpack==1.0.3 msgpack-numpy==0.4.7 or 0.4.8
 """
 
 class SEM(model.HwComponent):
@@ -141,8 +140,8 @@ class SEM(model.HwComponent):
                 f"version {self._hwVersion}")
         except CommunicationError as err:
             raise HwError("Failed to connect to autoscript server '%s'. Check that the "
-                          "uri is correct and autoscript server is"
-                          " connected to the network. %s %s" % (address, err, debug_connection_info))
+                          "URI is correct and autoscript server is "
+                          "connected to the network. %s\n%s" % (address, err, debug_connection_info))
         except OSError as err:
             raise HwError("XT server reported error: %s." % (err,))
 

@@ -26,8 +26,13 @@ import odemis.gui as gui
 from odemis.util import testing
 import os
 import shutil
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.case import skip
+from unittest.mock import patch
+
+from odemis.gui.conf import licences
 
 logging.getLogger().setLevel(logging.DEBUG)
 
@@ -208,6 +213,32 @@ class CalibrationConfigTest(ConfigTest, unittest.TestCase):
                 testing.assert_tuple_almost_equal(o, b)
             else:
                 self.assertAlmostEqual(o, b)
+
+class LicenceTest(unittest.TestCase):
+    """ Test the odemis-advanced licence flags """
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        conf = Path(self.tmpdir.name) / "odemis_advanced.config"
+        conf.write_text("[licence]\nenabled = True\nexpires_at = 2999-01-01\n")
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_milling_needs_fibsemos(self):
+        """ Milling is only enabled if fibsemOS is installed, the rest of the licence is unaffected """
+        with patch.object(licences, "CONF_PATH", self.tmpdir.name), \
+             patch("odemis.acq.milling.fibsemos.FIBSEMOS_INSTALLED", True):
+            self.assertTrue(licences.get_license_enabled()["milling"])
+
+        with patch.object(licences, "CONF_PATH", self.tmpdir.name), \
+             patch("odemis.acq.milling.fibsemos.FIBSEMOS_INSTALLED", False), \
+             self.assertLogs(level=logging.WARNING):
+            lic = licences.get_license_enabled()
+        self.assertFalse(lic["milling"])
+        self.assertTrue(lic["enabled"])
+        self.assertTrue(lic["fibsem"])
+
 
 if __name__ == "__main__":
     unittest.main()

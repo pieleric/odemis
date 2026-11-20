@@ -68,6 +68,14 @@ def get_license_enabled() -> dict:
             correlation_enabled = False
             logging.warning("odemis-advanced licence has expired on %s", expires_at.strftime("%Y-%m-%d"))
 
+    if milling_enabled:
+        # The milling is entirely done via fibsemOS => without it, act as if not licensed
+        from odemis.acq.milling.fibsemos import FIBSEMOS_INSTALLED
+        if not FIBSEMOS_INSTALLED:
+            milling_enabled = False
+            logging.warning("odemis-advanced milling licence is present, but fibsemOS is not installed: "
+                            "milling is disabled")
+
     logging.debug(f"odemis-advanced mode is {'enabled' if enabled else 'disabled'}")
     return {"enabled": enabled,
             "fibsem": fibsem_enabled,

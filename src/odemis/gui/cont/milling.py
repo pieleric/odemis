@@ -42,7 +42,6 @@ from odemis.acq.feature import (
     MillingAlignmentAreaTooSmallError,
     constrain_milling_alignment_area,
 )
-from odemis.acq.milling import fibsemos, millmng
 from odemis.acq.milling.millmng import MillingWorkflowTask, run_automated_milling
 from odemis.acq.milling.patterns import (
     CorrelationPatternParameters,
@@ -336,11 +335,6 @@ class MillingTaskController:
             self.viewport.view.stream_tree.flat.subscribe(self._redraw_alignment_area)
         self._tab_data.main.currentFeature.subscribe(self._on_current_feature_changes, init=True)
 
-        # By default, all widgets are hidden => show button + estimated time at initialization
-        self._panel.txt_milling_est_time.Hide()
-        self._panel.btn_run_milling.Hide()
-        self._panel.Layout()
-
         self._panel.txt_automated_milling_est_time.Hide()
         self._panel.gauge_automated_milling.Hide()
         self._panel.btn_automated_milling_cancel.Hide()
@@ -351,10 +345,6 @@ class MillingTaskController:
         self.valid_patterns = model.BooleanVA(False)
         self._tab_data.streams.subscribe(self._update_mill_btn, init=True)
         self.valid_patterns.subscribe(self._update_mill_btn, init=True)
-
-        # bind milling events
-        self._panel.btn_run_milling.Bind(wx.EVT_BUTTON, self._run_milling)
-        self._panel.btn_milling_cancel.Bind(wx.EVT_BUTTON, self._cancel_milling_series)
 
     def _on_current_feature_changes(self, feature: Optional[CryoFeature]) -> None:
         """Load patterns when navigation changes the current feature.
@@ -1314,70 +1304,6 @@ class MillingTaskController:
         self._panel.pnl_patterns.Layout()
         self._panel.Layout()
 
-    @call_in_wx_main
-    def _run_milling(self, evt: wx.Event):
-        """
-        called when the button "MILL" is pressed
-        """
-
-        # Make sure all the streams are paused
-        self._tab.streambar_controller.pauseStreams()
-
-        # hide/show/disable some widgets
-        self._panel.txt_milling_est_time.Hide()
-        self._panel.txt_milling_series_left_time.Show()
-        self._panel.gauge_milling_series.Show()
-        self._panel.btn_milling_cancel.Show()
-        self._tab_data.main.is_acquiring.value = True
-
-        # disable moving milling patterns while milling
-        self.allow_milling_pattern_move = False
-
-        # run the milling tasks
-        tasks = [task for task_name, task in self.milling_tasks.items() if task_name in self.selected_tasks.value]
-        self._mill_future = millmng.run_milling_tasks(tasks=tasks,
-                                                      fib_stream=self._tab.fib_stream)
-
-        # link the milling gauge to the milling future
-        self._gauge_future_conn = ProgressiveFutureConnector(
-            future=self._mill_future,
-            bar=self._panel.gauge_milling_series,
-            label=self._panel.txt_milling_series_left_time,
-            full=False,
-        )
-
-        self._mill_future.add_done_callback(self._on_milling_done)
-        self._panel.Layout()
-
-    @call_in_wx_main
-    def _on_milling_done(self, future):
-        """
-        Called when the acquisition process is
-        done, failed or canceled
-        """
-        self._gauge_future_conn = None
-        self._tab_data.main.is_acquiring.value = False
-        self.allow_milling_pattern_move = True
-
-        self._panel.gauge_milling_series.Hide()
-        self._panel.btn_milling_cancel.Hide()
-        self._panel.txt_milling_series_left_time.Hide()
-        self._panel.txt_milling_est_time.Show()
-
-        # Update the milling status text
-        if future is None:
-            milling_status_txt = "Milling cancelled."
-        else:
-            try:
-                future.result()
-                milling_status_txt = "Milling completed."
-            except CancelledError:
-                milling_status_txt = "Milling cancelled."
-            except Exception:
-                milling_status_txt = "Milling failed."
-
-        self._panel.txt_milling_est_time.SetLabel(milling_status_txt)
-
     @wxlimit_invocation(1)  # max 1/s
     def _update_milling_time(self):
         """Updates the estimated time required for milling"""
@@ -1386,7 +1312,6 @@ class MillingTaskController:
         txt = "Estimated time: {}.".format(
             units.readable_time(20 * len(self.selected_tasks.value), full=False)
         ) #TODO: accurate time estimate
-        self._panel.txt_milling_est_time.SetLabel(txt)
         self._panel.txt_automated_milling_est_time.SetLabel(txt)
 
     def _on_patterns(self, dat):
@@ -1398,13 +1323,6 @@ class MillingTaskController:
         self.draw_milling_tasks()
         self._update_milling_validation_message()
         self._update_mill_btn()
-
-    def _cancel_milling_series(self, _):
-        """
-        called when the button "Cancel" is pressed
-        """
-        logging.debug("Cancelling milling.")
-        self._mill_future.cancel()
 
     def _on_acquisition(self, is_acquiring: bool):
         """
@@ -1431,7 +1349,6 @@ class MillingTaskController:
             and not invalid_spot_size_correction and not invalid_alignment_reference
             and not alignment_area_overlap
         )
-        self._panel.btn_run_milling.Enable(milling_enabled)
         feature_list = self._panel.workflow_features_chk_list
         has_features = any(feature_list.IsChecked(i) for i in range(feature_list.GetCount()))
         has_workflow_steps = bool(self._panel.workflow_task_chk_list.GetCheckedItems())
@@ -1439,12 +1356,10 @@ class MillingTaskController:
 
         if not has_tasks:
             txt = "No Tasks Selected..."
-            self._panel.txt_milling_est_time.SetLabel(txt)
             self._panel.txt_automated_milling_est_time.SetLabel(txt)
 
         if not valid_patterns:
             txt = "Invalid milling pattern..."
-            self._panel.txt_milling_est_time.SetLabel(txt)
             self._panel.txt_automated_milling_est_time.SetLabel(txt)
 
         if has_tasks and valid_patterns:
@@ -1649,15 +1564,14 @@ class AutomatedMillingController:
         task_list = [task for i, task in enumerate(self.task_list) if self._panel.workflow_task_chk_list.IsChecked(i)]
         if not features or not task_list:
             return
-        if fibsemos.FIBSEMOS_INSTALLED:
-            missing_state = [feature.name.value for feature in features if not feature.system_state]
-            if missing_state:
-                wx.MessageBox(
-                    f"New FIB reference images are required for: {', '.join(missing_state)}.\n\n"
-                    "Select each feature, move to its milling position, and click SAVE POSITION "
-                    "to acquire a new reference image before starting automated milling.",
-                    "New milling references required", wx.OK | wx.ICON_WARNING)
-                return
+        missing_state = [feature.name.value for feature in features if not feature.system_state]
+        if missing_state:
+            wx.MessageBox(
+                f"New FIB reference images are required for: {', '.join(missing_state)}.\n\n"
+                "Select each feature, move to its milling position, and click SAVE POSITION "
+                "to acquire a new reference image before starting automated milling.",
+                "New milling references required", wx.OK | wx.ICON_WARNING)
+            return
         stage = self._tab_data.main.stage_bare
         sem_stream = self._tab.sem_stream
         fib_stream = self._tab.fib_stream
